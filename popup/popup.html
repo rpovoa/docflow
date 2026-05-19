@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocFlow</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <!-- ── Header ───────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="logo">
+      <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="3" y="2" width="14" height="18" rx="2" fill="#3b82f6"/>
+        <rect x="6" y="6" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <rect x="6" y="9.5" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <rect x="6" y="13" width="5" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <circle cx="18" cy="18" r="5" fill="#22c55e"/>
+        <path d="M15.5 18l1.8 1.8 3-3" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="logo-text">DocFlow</span>
+    </div>
+    <button class="btn-icon" id="btn-open-dashboard-header" title="Abrir Dashboard" aria-label="Abrir Dashboard">
+      <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+        <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- ── State: Idle ───────────────────────────────────────────────────────── -->
+  <div class="state" id="state-idle">
+    <p class="state-hint">Dá um nome à sessão e começa a gravar.</p>
+    <div class="field-group">
+      <label class="field-label" for="session-title">Nome da sessão</label>
+      <input class="field-input" type="text" id="session-title"
+             placeholder="Ex: Criar novo cliente" maxlength="80">
+    </div>
+    <button class="btn btn-primary" id="btn-start">
+      <span class="btn-dot" aria-hidden="true"></span>
+      Iniciar Sessão
+    </button>
+    <button class="btn btn-ghost hidden" id="btn-open-history-idle">
+      📚 Sessões guardadas <span class="history-badge hidden" id="history-badge"></span>
+    </button>
+  </div>
+
+  <!-- ── State: Recording ─────────────────────────────────────────────────── -->
+  <div class="state hidden" id="state-recording" aria-live="polite">
+    <div class="recording-badge" role="status">
+      <span class="recording-dot" aria-hidden="true"></span>
+      A GRAVAR
+    </div>
+    <p class="session-name" id="recording-title"></p>
+
+    <div class="counters">
+      <div class="counter">
+        <span class="counter-value" id="step-count">0</span>
+        <span class="counter-label">passos</span>
+      </div>
+      <div class="counter">
+        <span class="counter-value" id="screenshot-count">0</span>
+        <span class="counter-label">screenshots</span>
+      </div>
+    </div>
+
+    <!-- Note area (US-05) -->
+    <div class="note-area hidden" id="note-area">
+      <textarea class="field-input note-input" id="note-input"
+                placeholder="Escreve uma nota contextual..." rows="3"></textarea>
+      <button class="btn btn-secondary btn-sm" id="btn-add-note-confirm">
+        Adicionar nota
+      </button>
+    </div>
+
+    <div class="action-row">
+      <button class="btn btn-secondary btn-sm" id="btn-toggle-note" title="Adicionar nota manual">
+        📝 Nota
+      </button>
+      <button class="btn btn-secondary btn-sm" id="btn-screenshot" title="Capturar screenshot">
+        📸 Screenshot
+      </button>
+      <button class="btn btn-ghost btn-sm btn-undo" id="btn-undo-step" title="Desfazer último passo capturado">
+        ↩
+      </button>
+    </div>
+
+    <button class="btn btn-danger" id="btn-stop">Parar Sessão</button>
+  </div>
+
+  <!-- ── State: Done ───────────────────────────────────────────────────────── -->
+  <div class="state hidden" id="state-done">
+    <div class="done-header">
+      <svg class="done-icon" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="11" fill="#22c55e" opacity="0.15"/>
+        <circle cx="12" cy="12" r="11" stroke="#22c55e" stroke-width="1.5"/>
+        <path d="M7.5 12l3 3 6-6" stroke="#22c55e" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="done-title">Sessão concluída</span>
+    </div>
+    <p class="summary" id="done-summary"></p>
+
+    <div class="no-key-msg hidden" id="no-key-msg">
+      <p class="no-key-text">Chave API não configurada ou bloqueada.</p>
+      <button class="btn btn-secondary btn-sm" id="btn-go-settings">⚙ Configurar no Dashboard</button>
+    </div>
+
+    <button class="btn btn-primary" id="btn-generate">
+      ✨ Gerar Documento com IA
+    </button>
+
+    <div class="generating hidden" id="generating-state" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      A gerar documento...
+    </div>
+
+    <p class="error-msg hidden" id="gen-error" role="alert"></p>
+
+    <button class="btn btn-secondary" id="btn-resume-session">
+      ▶ Continuar gravação
+    </button>
+
+    <button class="btn btn-secondary" id="btn-open-history-done">
+      📚 Combinar com outras sessões
+    </button>
+
+    <button class="btn btn-ghost" id="btn-new-session">Nova Sessão</button>
+  </div>
+
+  <!-- ── State: History ──────────────────────────────────────────────────── -->
+  <div class="state hidden" id="state-history">
+    <div class="history-header">
+      <span class="history-title">Sessões guardadas</span>
+      <span class="history-hint">Seleciona as sessões para combinar num documento</span>
+    </div>
+
+    <div class="session-list" id="session-list">
+      <!-- populated by JS -->
+    </div>
+
+    <p class="error-msg hidden" id="history-empty" style="background:none;border:none;color:var(--text-muted)">
+      Ainda não tens sessões guardadas.
+    </p>
+
+    <button class="btn btn-primary hidden" id="btn-generate-multi" disabled>
+      ✨ Gerar documento
+    </button>
+
+    <div class="generating hidden" id="generating-state-multi" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      A gerar documento...
+    </div>
+
+    <p class="error-msg hidden" id="gen-error-multi" role="alert"></p>
+
+    <button class="btn btn-ghost" id="btn-back-from-history">← Voltar</button>
+  </div>
+
+  <!-- ── Footer ──────────────────────────────────────────────────────────── -->
+  <div class="popup-footer">
+    <button class="footer-settings-btn" id="btn-open-dashboard">⚙ Configurações · Dashboard</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

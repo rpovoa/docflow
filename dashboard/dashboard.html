@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocFlow — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────────── -->
+  <header class="dash-header">
+    <div class="dash-logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="2" width="14" height="18" rx="2" fill="#3b82f6"/>
+        <rect x="6" y="6" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <rect x="6" y="9.5" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <rect x="6" y="13" width="5" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+        <circle cx="18" cy="18" r="5" fill="#22c55e"/>
+        <path d="M15.5 18l1.8 1.8 3-3" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="dash-logo-text">DocFlow</span>
+      <span class="dash-logo-badge">Dashboard</span>
+    </div>
+    <div class="dash-header-center" id="combine-bar" style="display:none">
+      <span class="combine-label" id="combine-label">2 sessões selecionadas</span>
+      <button class="btn btn-primary btn-sm" id="btn-combine-generate">
+        ✨ Combinar e Gerar
+      </button>
+      <button class="btn btn-ghost btn-sm" id="btn-combine-clear">Limpar</button>
+    </div>
+    <div class="dash-header-right">
+      <span class="shortcut-hint" id="shortcut-hint"></span>
+    </div>
+  </header>
+
+  <!-- ── Layout ─────────────────────────────────────────────────────────────── -->
+  <div class="dash-layout">
+
+    <!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
+    <aside class="dash-sidebar">
+      <div class="sidebar-top">
+        <span class="sidebar-title">Sessões</span>
+        <span class="sidebar-count" id="sidebar-count">0</span>
+      </div>
+
+      <div class="session-list" id="session-list">
+        <!-- populated by JS -->
+      </div>
+
+      <div class="sidebar-empty hidden" id="sidebar-empty">
+        <p>Ainda não tens sessões gravadas.</p>
+        <p class="sidebar-empty-hint">Usa o popup da extensão para iniciar uma gravação.</p>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="sidebar-settings-btn" id="btn-nav-settings" title="Configurações">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
+          </svg>
+          Configurações
+        </button>
+      </div>
+    </aside>
+
+    <!-- ── Main area ─────────────────────────────────────────────────────────── -->
+    <main class="dash-main">
+
+      <!-- Empty state -->
+      <div class="main-empty" id="main-empty">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" opacity="0.3">
+          <rect x="3" y="2" width="14" height="18" rx="2" stroke="#6b7280" stroke-width="1.5"/>
+          <path d="M6 7h8M6 10.5h8M6 14h5" stroke="#6b7280" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <p class="main-empty-title">Seleciona uma sessão</p>
+        <p class="main-empty-hint">Clica numa sessão à esquerda para ver os passos capturados e gerar o documento.</p>
+      </div>
+
+      <!-- Session detail -->
+      <div class="session-detail hidden" id="session-detail">
+
+        <!-- Recording banner -->
+        <div class="recording-banner hidden" id="recording-banner">
+          <span class="rec-dot"></span>
+          <span>Sessão a gravar — abre o popup da extensão para continuar</span>
+        </div>
+
+        <!-- Resume success toast -->
+        <div class="resume-toast hidden" id="resume-toast">
+          ✅ Sessão retomada! Clica no ícone da extensão para gravar.
+        </div>
+
+        <!-- Detail header -->
+        <div class="detail-header">
+          <div class="detail-title-row">
+            <h1 class="detail-title" id="detail-title"></h1>
+            <div class="detail-actions">
+              <button class="btn btn-outline btn-sm hidden" id="btn-copy-md" title="Copiar Markdown">
+                📋 Copiar MD
+              </button>
+              <button class="btn btn-outline btn-sm hidden" id="btn-download-html" title="Exportar HTML">
+                ⬇ HTML
+              </button>
+              <button class="btn btn-outline btn-sm hidden" id="btn-edit-doc">
+                ✏️ Editar
+              </button>
+              <button class="btn btn-secondary btn-sm" id="btn-resume-session">
+                ▶ Continuar
+              </button>
+              <button class="btn btn-primary btn-sm" id="btn-generate-doc">
+                ✨ Gerar com IA
+              </button>
+              <button class="btn btn-danger-sm" id="btn-delete-session" title="Apagar sessão">
+                🗑
+              </button>
+            </div>
+          </div>
+          <p class="detail-meta" id="detail-meta"></p>
+
+          <!-- Tabs (only when doc exists) -->
+          <div class="detail-tabs hidden" id="detail-tabs">
+            <button class="dtab active" data-tab="steps" id="dtab-steps">Passos</button>
+            <button class="dtab" data-tab="document" id="dtab-document">Documento</button>
+          </div>
+        </div>
+
+        <!-- ── Steps tab ─────────────────────────────────────────────────────── -->
+        <div class="tab-pane" id="pane-steps">
+          <div class="steps-list" id="steps-list"></div>
+        </div>
+
+        <!-- ── Document tab ──────────────────────────────────────────────────── -->
+        <div class="tab-pane hidden" id="pane-document">
+
+          <!-- View mode -->
+          <div id="doc-view">
+            <div class="result-document" id="doc-rendered"></div>
+          </div>
+
+          <!-- Edit mode -->
+          <div class="hidden" id="doc-edit">
+            <div class="editor-toolbar">
+              <span class="editor-hint">Edita o Markdown à esquerda — a pré-visualização atualiza em tempo real</span>
+              <div class="editor-toolbar-actions">
+                <button class="btn btn-primary btn-sm" id="btn-save-edit">Guardar</button>
+                <button class="btn btn-ghost btn-sm" id="btn-cancel-edit">Cancelar</button>
+              </div>
+            </div>
+            <div class="editor-split">
+              <textarea class="editor-textarea" id="editor-textarea" spellcheck="false"></textarea>
+              <div class="editor-preview result-document" id="editor-preview"></div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Generating overlay inside detail -->
+        <div class="gen-overlay hidden" id="gen-overlay">
+          <div class="gen-overlay-inner">
+            <span class="spinner"></span>
+            <span>A gerar documento com IA...</span>
+          </div>
+        </div>
+
+        <p class="gen-error hidden" id="gen-error"></p>
+
+      </div>
+
+      <!-- ── Settings panel ──────────────────────────────────────────────────── -->
+      <div class="settings-panel hidden" id="settings-panel">
+        <div class="settings-header">
+          <h2 class="settings-title">Configurações</h2>
+          <p class="settings-subtitle">As configurações são guardadas automaticamente no teu browser.</p>
+        </div>
+
+        <!-- IA & API Keys -->
+        <section class="settings-section">
+          <h3 class="settings-section-title">IA &amp; Chaves de API</h3>
+
+          <div class="settings-row">
+            <span class="settings-label">Fornecedor</span>
+            <div class="provider-tabs" id="s-provider-tabs">
+              <button class="provider-tab active" data-provider="anthropic">Anthropic</button>
+              <button class="provider-tab" data-provider="openai">OpenAI</button>
+            </div>
+          </div>
+
+          <div class="settings-row">
+            <span class="settings-label">Modelo</span>
+            <select class="settings-select" id="s-model-select"></select>
+          </div>
+
+          <!-- Key management for Anthropic -->
+          <div class="key-section" id="s-key-section-anthropic">
+            <div class="key-section-title">Chave API Anthropic</div>
+
+            <!-- State A: not configured -->
+            <div class="key-state" id="s-anth-state-setup">
+              <input type="password" class="settings-input" id="s-anth-key" placeholder="sk-ant-api03-..." autocomplete="off">
+              <div class="pin-row">
+                <input type="password" class="settings-input" id="s-anth-pin" placeholder="PIN de acesso (mín. 4 caracteres)" autocomplete="new-password" maxlength="32">
+                <input type="password" class="settings-input" id="s-anth-pin2" placeholder="Confirmar PIN" autocomplete="new-password" maxlength="32">
+              </div>
+              <p class="key-security-note">
+                🔒 A chave é encriptada com AES-256-GCM antes de ser guardada. O PIN é necessário para desbloquear a cada sessão do browser.
+              </p>
+              <button class="btn btn-primary btn-sm" id="s-anth-save-btn">Guardar e Encriptar</button>
+              <p class="key-msg hidden" id="s-anth-msg"></p>
+            </div>
+
+            <!-- State B: configured but locked -->
+            <div class="key-state hidden" id="s-anth-state-locked">
+              <div class="key-status key-status-locked">🔒 Chave configurada — bloqueada</div>
+              <p class="key-unlock-hint">Introduz o PIN para desbloquear nesta sessão</p>
+              <input type="password" class="settings-input" id="s-anth-unlock-pin" placeholder="PIN de acesso" autocomplete="current-password" maxlength="32">
+              <div class="key-actions">
+                <button class="btn btn-primary btn-sm" id="s-anth-unlock-btn">Desbloquear</button>
+                <button class="btn btn-ghost btn-sm" id="s-anth-reset-btn">Redefinir chave</button>
+              </div>
+              <p class="key-msg hidden" id="s-anth-unlock-msg"></p>
+            </div>
+
+            <!-- State C: configured and unlocked -->
+            <div class="key-state hidden" id="s-anth-state-unlocked">
+              <div class="key-status key-status-unlocked">🔓 Desbloqueada <span class="key-hint" id="s-anth-hint"></span></div>
+              <div class="key-actions">
+                <button class="btn btn-ghost btn-sm" id="s-anth-lock-btn">🔒 Bloquear</button>
+                <button class="btn btn-ghost btn-sm" id="s-anth-change-btn">✏ Alterar chave</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Key management for OpenAI -->
+          <div class="key-section hidden" id="s-key-section-openai">
+            <div class="key-section-title">Chave API OpenAI</div>
+
+            <div class="key-state" id="s-oai-state-setup">
+              <input type="password" class="settings-input" id="s-oai-key" placeholder="sk-..." autocomplete="off">
+              <div class="pin-row">
+                <input type="password" class="settings-input" id="s-oai-pin" placeholder="PIN de acesso (mín. 4 caracteres)" autocomplete="new-password" maxlength="32">
+                <input type="password" class="settings-input" id="s-oai-pin2" placeholder="Confirmar PIN" autocomplete="new-password" maxlength="32">
+              </div>
+              <p class="key-security-note">🔒 A chave é encriptada com AES-256-GCM antes de ser guardada.</p>
+              <button class="btn btn-primary btn-sm" id="s-oai-save-btn">Guardar e Encriptar</button>
+              <p class="key-msg hidden" id="s-oai-msg"></p>
+            </div>
+
+            <div class="key-state hidden" id="s-oai-state-locked">
+              <div class="key-status key-status-locked">🔒 Chave configurada — bloqueada</div>
+              <p class="key-unlock-hint">Introduz o PIN para desbloquear nesta sessão</p>
+              <input type="password" class="settings-input" id="s-oai-unlock-pin" placeholder="PIN de acesso" autocomplete="current-password" maxlength="32">
+              <div class="key-actions">
+                <button class="btn btn-primary btn-sm" id="s-oai-unlock-btn">Desbloquear</button>
+                <button class="btn btn-ghost btn-sm" id="s-oai-reset-btn">Redefinir chave</button>
+              </div>
+              <p class="key-msg hidden" id="s-oai-unlock-msg"></p>
+            </div>
+
+            <div class="key-state hidden" id="s-oai-state-unlocked">
+              <div class="key-status key-status-unlocked">🔓 Desbloqueada <span class="key-hint" id="s-oai-hint"></span></div>
+              <div class="key-actions">
+                <button class="btn btn-ghost btn-sm" id="s-oai-lock-btn">🔒 Bloquear</button>
+                <button class="btn btn-ghost btn-sm" id="s-oai-change-btn">✏ Alterar chave</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Captures -->
+        <section class="settings-section">
+          <h3 class="settings-section-title">Capturas de Ecrã</h3>
+          <div class="settings-row settings-toggle-row">
+            <div>
+              <span class="settings-label">Screenshots automáticos</span>
+              <p class="settings-desc">Captura um screenshot ao clicar, preencher campos e selecionar valores.</p>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="s-capture-screenshots" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Reference document -->
+        <section class="settings-section">
+          <h3 class="settings-section-title">Documento de Referência</h3>
+          <div class="settings-row settings-toggle-row">
+            <div>
+              <span class="settings-label">Usar documento de referência</span>
+              <p class="settings-desc">A IA replica o estilo, estrutura e tom do documento ao gerar novos manuais.</p>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="s-template-toggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <div id="s-template-area" class="hidden">
+            <textarea class="settings-textarea" id="s-template-text" rows="8"
+                      placeholder="Cola aqui o conteúdo do manual de referência..."></textarea>
+            <div class="template-toolbar">
+              <span class="template-chars" id="s-template-chars">0 caracteres</span>
+              <div class="template-actions">
+                <label class="btn btn-ghost btn-sm" for="s-template-file">📄 Abrir ficheiro</label>
+                <input type="file" id="s-template-file" accept=".txt,.md" class="hidden">
+                <button class="btn btn-ghost btn-sm" id="s-clear-template">Limpar</button>
+                <button class="btn btn-outline btn-sm" id="s-extract-style">✨ Extrair estilo</button>
+              </div>
+            </div>
+            <p class="settings-desc" style="margin-top:6px">
+              O botão "Extrair estilo" analisa o documento e gera um guia de estilo compacto (~600 palavras) para usar como referência em todas as gerações futuras.
+            </p>
+            <p class="key-msg hidden" id="s-extract-msg"></p>
+          </div>
+        </section>
+
+        <div class="settings-save-bar">
+          <button class="btn btn-primary" id="s-save-prefs">Guardar preferências</button>
+          <p class="key-msg hidden" id="s-prefs-msg"></p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ── Lightbox ───────────────────────────────────────────────────────────── -->
+  <div class="lightbox hidden" id="lightbox">
+    <button class="lightbox-close" id="lightbox-close">×</button>
+    <div class="lightbox-img-wrap" id="lightbox-img-wrap">
+      <img class="lightbox-img" id="lightbox-img" src="" alt="">
+    </div>
+    <p class="lightbox-caption" id="lightbox-caption"></p>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

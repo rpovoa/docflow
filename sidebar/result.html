@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocFlow</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="result.css">
+</head>
+<body>
+
+  <!-- ── Loading ──────────────────────────────────────────────────────────── -->
+  <div id="loading" class="full-center">
+    <div class="spinner"></div>
+    <span>A carregar documento...</span>
+  </div>
+
+  <!-- ── No document found ─────────────────────────────────────────────────── -->
+  <div id="no-doc" class="full-center hidden">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" opacity="0.3">
+      <rect x="3" y="2" width="14" height="18" rx="2" fill="#3b82f6"/>
+    </svg>
+    <p>Nenhum documento encontrado.</p>
+    <p class="muted">Volta ao DocFlow, grava uma sessão e clica em <strong>Gerar Documento</strong>.</p>
+  </div>
+
+  <!-- ── Main app ──────────────────────────────────────────────────────────── -->
+  <div id="app" class="hidden">
+
+    <!-- Sticky header -->
+    <header class="result-header">
+      <div class="header-logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+          <rect x="3" y="2" width="14" height="18" rx="2" fill="#3b82f6"/>
+          <rect x="6" y="6" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+          <rect x="6" y="9.5" width="8" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+          <rect x="6" y="13" width="5" height="1.5" rx="0.75" fill="#fff" opacity="0.9"/>
+          <circle cx="18" cy="18" r="5" fill="#22c55e"/>
+          <path d="M15.5 18l1.8 1.8 3-3" stroke="#fff" stroke-width="1.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="header-logo-text">DocFlow</span>
+      </div>
+
+      <span class="header-title" id="header-title"></span>
+
+      <div class="header-actions">
+        <button class="btn btn-outline" id="btn-copy-md" title="Copiar Markdown para a área de transferência">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/>
+            <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/>
+          </svg>
+          Copiar Markdown
+        </button>
+        <button class="btn btn-outline" id="btn-download-html" title="Descarregar como ficheiro HTML">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/>
+          </svg>
+          Descarregar HTML
+        </button>
+      </div>
+    </header>
+
+    <!-- Two-column layout -->
+    <div class="result-layout">
+
+      <!-- Sidebar: captured step list -->
+      <aside class="result-sidebar">
+        <div class="sidebar-header">
+          Passos gravados
+          <span class="sidebar-count" id="step-count-badge">0</span>
+        </div>
+        <div class="step-list" id="step-list"></div>
+      </aside>
+
+      <!-- Main: document + screenshots -->
+      <main class="result-main">
+        <article class="result-document" id="document-content"></article>
+
+        <section class="screenshots-section" id="screenshots-section">
+          <div class="screenshots-header">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" opacity="0.5">
+              <path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"/>
+            </svg>
+            Screenshots
+            <span class="sidebar-count" id="screenshot-count">0</span>
+          </div>
+          <div class="screenshots-grid" id="screenshots-grid"></div>
+        </section>
+      </main>
+
+    </div>
+  </div>
+
+  <!-- ── Lightbox ───────────────────────────────────────────────────────────── -->
+  <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot em tamanho completo">
+    <button class="lightbox-close" id="lightbox-close" aria-label="Fechar">✕</button>
+    <div class="lightbox-img-wrap" id="lightbox-img-wrap">
+      <img class="lightbox-img" id="lightbox-img" alt="">
+    </div>
+    <p class="lightbox-caption" id="lightbox-caption"></p>
+  </div>
+
+  <script src="result.js"></script>
+</body>
+</html>
