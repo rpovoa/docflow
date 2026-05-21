@@ -315,6 +315,9 @@ function buildStepLabel(step) {
   if (step.type === 'screenshot') {
     return `<strong>Screenshot</strong> manual`;
   }
+  if (step.type === 'narration') {
+    return `<strong>Narração</strong>: <em>${escHtml(step.note || '—')}</em>`;
+  }
 
   const typeLabels = { click: 'Clique', input: 'Preenchimento', select: 'Seleção', submit: 'Envio' };
   const typeStr = typeLabels[step.type] || step.type;
@@ -331,6 +334,7 @@ function buildStepLabelPlain(step) {
   if (step.type === 'navigation') return step.pageTitle || step.url || 'Navegação';
   if (step.type === 'manual')     return step.note || 'Nota';
   if (step.type === 'screenshot') return 'Screenshot';
+  if (step.type === 'narration')  return `Narração: ${step.note || ''}`;
   return step.element?.label || step.type;
 }
 

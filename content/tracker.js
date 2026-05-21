@@ -14,6 +14,11 @@
 
   const inputTimers = new Map();
 
+  // Deduplication: track last click to drop accidental double-clicks
+  let lastClickKey  = null;
+  let lastClickTime = 0;
+  const CLICK_DEDUP_MS = 1500;
+
   // ── Element metadata ──────────────────────────────────────────────────────
 
   function extractLabel(el) {
@@ -77,6 +82,15 @@
     if (!isRecording || isPaused) return;
     const el = e.target;
     if (el.closest && el.closest('#docflow-sidebar-host')) return;
+
+    // Drop accidental double-clicks / rapid re-clicks on the same element
+    const now = Date.now();
+    const key = el.id || el.getAttribute('name') || el.getAttribute('aria-label')
+              || el.textContent?.trim().slice(0, 60) || el.tagName;
+    if (key && key === lastClickKey && now - lastClickTime < CLICK_DEDUP_MS) return;
+    lastClickKey  = key;
+    lastClickTime = now;
+
     flashElement(el);
     const ann = elementAnnotation(el);
     ann.x = e.clientX;

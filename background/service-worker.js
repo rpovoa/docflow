@@ -163,6 +163,17 @@ async function togglePause() {
 async function addStep(stepData, tabId) {
   if (!currentSession || currentSession.stoppedAt) return null;
 
+  // Server-side deduplication: drop consecutive identical click/input on same element
+  if (['click', 'input', 'select'].includes(stepData.type)) {
+    const last = currentSession.steps[currentSession.steps.length - 1];
+    if (last &&
+        last.type  === stepData.type &&
+        last.url   === stepData.url &&
+        last.element?.label === stepData.element?.label) {
+      return last;
+    }
+  }
+
   const sd = await chrome.storage.local.get(['settings', 'captureScreenshots']);
   const _s = sd.settings || {};
   const shouldCapture =
@@ -194,37 +205,75 @@ async function addStep(stepData, tabId) {
 
 // ── Document generation (US-09) ───────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `És um assistente especializado na criação de manuais de utilizador profissionais em português europeu (PT-PT).
+const SYSTEM_PROMPT = `És um especialista em documentação funcional de software em português europeu (PT-PT).
 
-Recebes metadados de ações realizadas por um utilizador numa aplicação web (cliques, preenchimento de campos, navegação, notas) e crias um manual de utilizador completo, claro e bem estruturado.
+Recebes metadados de uma sessão de utilização — cliques, preenchimentos, navegação e narrações de voz — e crias um documento de referência funcional: não um tutorial passo a passo, mas uma DESCRIÇÃO DO QUE EXISTE E COMO FUNCIONA, como se fosse a documentação oficial da funcionalidade.
 
-FORMATO OBRIGATÓRIO — responde APENAS com Markdown, sem texto antes ou depois:
+━━━ FORMATO OBRIGATÓRIO ━━━
+Responde APENAS com Markdown válido, sem texto antes ou depois.
 
-# Título do manual
-(título descritivo do processo, não técnico)
+# [Título da funcionalidade]
+(o QUÊ foi feito, em linguagem de utilizador — ex: "Criação de Entidade Bancária", "Registo de Novo Fornecedor")
 
-Introdução de 2-3 frases a explicar o objetivo e para quem é este processo.
+[Parágrafo de 2-3 frases: para que serve esta funcionalidade, quando é usada e qual o resultado esperado.]
 
-## Nome da Secção 1
-1. Primeiro passo — descreve a ação e o resultado esperado
-2. Segundo passo — ...
+## [Nome do Ecrã ou Área — ex: "Dados Gerais", "Informações de Contacto"]
 
-## Nome da Secção 2
-1. ...
+[Descreve o que o utilizador encontra neste ecrã ou área: o layout geral, quantos campos/secções existem, o propósito desta área dentro do processo.]
 
-REGRAS OBRIGATÓRIAS:
-- Escreve sempre em português europeu (PT-PT): "clique", "ecrã", "formulário", "guardar", "visualizar", "premir"
-- Linguagem clara e acessível para utilizadores sem conhecimento técnico
-- Cada passo numerado: descreve o que o utilizador faz + o que acontece a seguir
-- Não incluas URLs, IDs internos, nomes de campos técnicos nem termos de programação
-- Agrupa logicamente: preparação → ação principal → confirmação/resultado
-- Cria 2-5 secções lógicas dependendo da complexidade
-- Tom profissional mas direto e acessível
-- Para valores introduzidos em campos, menciona o tipo de informação (ex: "Introduz o nome do cliente")
-- Se houver notas manuais, integra-as no contexto do passo relevante
-- Passos marcados com [Narração] são transcrições de voz do utilizador gravadas durante a sessão, descrevendo o que estava a fazer ou o contexto de negócio da ação. Usa estas narrações para enriquecer e contextualizar os passos próximos — integra a informação narrada na descrição dos passos correspondentes, revelando o propósito e o raciocínio por trás das ações. Não apresentes as narrações como passos separados no manual
-- SCREENSHOTS: As ações marcadas com [📷] têm um screenshot capturado. Para cada passo do manual que corresponda a uma dessas ações, coloca o marcador {{screenshot:N}} imediatamente a seguir ao texto do passo (ainda dentro do item de lista), onde N é o número da ação original. Este marcador será substituído pela imagem no documento final. Usa SEMPRE o marcador quando a ação tem [📷]. Exemplo: "1. Clique em **Guardar** para confirmar os dados. {{screenshot:3}}"
-- Não uses {{screenshot:N}} em passos que não correspondam a ações com [📷]`;
+{{screenshot:N}}
+
+**Campos disponíveis:**
+| Campo | Descrição |
+|---|---|
+| **[Nome do campo]** | [O que representa, para que serve, se é obrigatório] |
+| **[Nome do campo]** | [O que representa, para que serve, se é obrigatório] |
+
+[1-2 frases sobre como concluir esta área — ex: "Após preencher os campos obrigatórios, clique em **Guardar** para avançar."]
+
+## [Próxima Área ou Ecrã]
+...
+
+━━━ REGRAS DE CONTEÚDO ━━━
+
+FILOSOFIA — O documento é uma REFERÊNCIA FUNCIONAL:
+- Descreve o que existe no ecrã e o que cada elemento faz — não enumeres os cliques do utilizador
+- O leitor deve entender a funcionalidade sem nunca ter visto o ecrã, só com o documento
+- Usa os dados da sessão para INFERIR o que cada ecrã/área contém, com base nos campos preenchidos e na navegação
+- Linguagem clara e direta, sem jargão técnico, sem URLs, IDs ou nomes de variáveis
+
+CAMPOS E FORMULÁRIOS:
+- Para cada campo preenchido, descreve o que representa e por que é necessário
+- Usa os valores preenchidos como exemplo apenas se forem informativos (não expões dados sensíveis)
+- Se vários campos pertencem à mesma área/card, agrupa-os numa tabela de campos
+- Indica quais são obrigatórios se for possível inferir pelos dados
+
+ESTRUTURA:
+- Organiza o documento por ECRÃS ou ÁREAS FUNCIONAIS, não por ordem de cliques
+- Identifica o ecrã/área a partir do pageTitle e do contexto das ações
+- 2 a 5 secções, dependendo da complexidade do processo
+- Cada secção = um ecrã ou uma área lógica do processo
+
+NARRAÇÃO DE VOZ:
+- Passos marcados com [Narração] são comentários de contexto gravados pelo utilizador
+- Integra o conteúdo narrado na descrição da área/ecrã correspondente para enriquecer a explicação funcional
+- Nunca cries uma secção separada para narrações
+
+DUPLICADOS E RUÍDO:
+- Ignora cliques de foco em campos (o clique para ativar antes de escrever é implícito)
+- Duas ações consecutivas idênticas → considera apenas uma
+- Ignora navegação interna sem impacto visível
+
+━━━ REGRAS DE SCREENSHOTS ━━━
+
+- Cada {{screenshot:N}} é uma captura do ecrã no momento exato da ação N
+- PREFERE screenshots de cliques em botões de navegação ou de início de preenchimento de formulários — são os que melhor mostram o ecrã completo
+- Coloca o {{screenshot:N}} IMEDIATAMENTE APÓS a frase que descreve o ecrã que ele mostra, antes da tabela de campos
+- Usa NO MÁXIMO 1 screenshot por secção, o mais representativo desse ecrã
+- OMITE o screenshot se nenhuma captura desse ecrã existe ou se a captura é de um detalhe pouco representativo
+- NUNCA uses um screenshot de ação A para ilustrar uma descrição de área B
+- Formato: linha separada, sozinho — {{screenshot:N}}`;
+
 
 function formatStep(step) {
   const labels = {
@@ -262,6 +311,21 @@ function formatStep(step) {
   return parts.join(' ');
 }
 
+function groupStepsByScreen(steps) {
+  // Group consecutive steps by pageTitle to help the AI identify screens
+  const groups = [];
+  let current = null;
+  for (const step of steps) {
+    const screen = step.pageTitle || '—';
+    if (!current || current.screen !== screen) {
+      current = { screen, steps: [] };
+      groups.push(current);
+    }
+    current.steps.push(step);
+  }
+  return groups;
+}
+
 function buildSessionText(session) {
   const date = new Date(session.startedAt).toLocaleDateString('pt-PT', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -274,19 +338,31 @@ function buildSessionText(session) {
   } catch {}
 
   const actionableSteps = session.steps.filter(s => s.type !== 'screenshot');
-  const stepsText = actionableSteps.map(formatStep).join('\n');
+  const narrationCount   = actionableSteps.filter(s => s.type === 'narration').length;
+  const interactionCount = actionableSteps.length - narrationCount;
 
-  return `Cria um manual de utilizador para a seguinte sessão gravada.
+  // Group by screen so the AI understands the screen structure
+  const screenGroups = groupStepsByScreen(actionableSteps);
+  const stepsText = screenGroups.map(group => {
+    const header = group.screen !== '—' ? `--- Ecrã: ${group.screen} ---` : '--- (ecrã desconhecido) ---';
+    return header + '\n' + group.steps.map(formatStep).join('\n');
+  }).join('\n\n');
+
+  const narrationNote = narrationCount > 0
+    ? `\nNarrações de voz: ${narrationCount} (marcadas com [Narração] — integra-as na descrição funcional da área correspondente)`
+    : '';
+
+  return `Cria a documentação funcional para a seguinte sessão gravada.
 
 Título da sessão: "${session.title}"
 Data: ${date}
 Aplicação: ${domain}
-Total de ações registadas: ${actionableSteps.length}
+Interações registadas: ${interactionCount}${narrationNote}
 
-Sequência de ações:
+Ações por ecrã (usa os separadores "--- Ecrã ---" para identificar as secções do documento):
 ${stepsText}
 
-Gera o manual completo em Markdown seguindo o formato e as regras do sistema.`;
+Gera o documento completo em Markdown seguindo o formato e as regras do sistema.`;
 }
 
 function buildPrompt(session, templateText, overrideSessionText) {
@@ -413,6 +489,18 @@ Responde APENAS com o guia de estilo em português europeu. Sem introdução, se
   }
 }
 
+// Load the bundled style guide from docs/reference/style-guide.md (if present)
+async function loadDefaultStyleGuide() {
+  try {
+    const res = await fetch(chrome.runtime.getURL('docs/reference/style-guide.md'));
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text.trim() || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Returns a copy of the session with excluded steps removed and indices reset
 function withoutExcluded(session) {
   const steps = session.steps
@@ -438,21 +526,32 @@ function buildMultiSessionText(sessions) {
     stepOffset += actionableSteps.length;
     allSteps.push(...reindexed);
 
-    const stepsText = reindexed.map(formatStep).join('\n');
+    const screenGroups = groupStepsByScreen(reindexed);
+    const stepsText = screenGroups.map(group => {
+      const header = group.screen !== '—' ? `--- Ecrã: ${group.screen} ---` : '--- (ecrã desconhecido) ---';
+      return header + '\n' + group.steps.map(formatStep).join('\n');
+    }).join('\n\n');
+
     return `PROCESSO ${sIdx + 1}: "${session.title}" (${date})\n${stepsText}`;
   }).join('\n\n');
 
   const totalTitle = sessions.map(s => s.title).join(' + ');
 
-  return `Cria um manual de utilizador que documenta os seguintes processos gravados em fases. Organiza o documento integrando todos os processos de forma coerente, como um único manual.
+  const totalNarrations   = allSteps.filter(s => s.type === 'narration').length;
+  const totalInteractions = allSteps.length - totalNarrations;
+  const narrationNote = totalNarrations > 0
+    ? `\nNarrações de voz: ${totalNarrations} (marcadas com [Narração] — integra-as na descrição funcional da área correspondente)`
+    : '';
+
+  return `Cria a documentação funcional para os seguintes processos gravados em fases. Organiza o documento integrando todos os processos de forma coerente.
 
 Processos gravados: ${sessions.length}
-Total de ações: ${allSteps.length}
+Interações registadas: ${totalInteractions}${narrationNote}
 Título sugerido: "${totalTitle}"
 
 ${sessionBlocks}
 
-Gera o manual completo em Markdown seguindo o formato e as regras do sistema.`;
+Gera o documento completo em Markdown seguindo o formato e as regras do sistema.`;
 }
 
 async function generateDocument(sessionIds) {
@@ -467,7 +566,10 @@ async function generateDocument(sessionIds) {
   const provider = _cfg.provider || data.provider || 'anthropic';
   const templateEnabled = _cfg.templateEnabled !== undefined ? _cfg.templateEnabled : !!data.templateEnabled;
   const templateText    = _cfg.templateText    || data.templateText || '';
-  const template = templateEnabled ? templateText : null;
+  // If no custom template configured, fall back to the bundled reference style guide
+  const template = templateEnabled && templateText
+    ? templateText
+    : await loadDefaultStyleGuide();
 
   let sessions;
   let pendingSession;
@@ -628,10 +730,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case MSG.ADD_NARRATION:
-      addStep(
+      _readyPromise.then(() => addStep(
         { type: 'narration', note: message.text, url: message.url, pageTitle: message.pageTitle },
         null // narrations don't trigger screenshot capture
-      ).then(step =>
+      )).then(step =>
         sendResponse({ step, stepCount: currentSession?.steps.length ?? 0 })
       );
       return true;
