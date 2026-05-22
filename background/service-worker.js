@@ -21,6 +21,7 @@ const MSG = {
   LOCK_SESSION:      'LOCK_SESSION',
   REMOVE_KEY:        'REMOVE_KEY',
   ADD_NARRATION:     'ADD_NARRATION',
+  IMPROVE_TEXT:      'IMPROVE_TEXT',
 };
 
 const MAX_HISTORY = 15;
@@ -84,7 +85,7 @@ async function captureScreenshot(tabId) {
 
 // ── Session operations ─────────────────────────────────────────────────────────
 
-async function startSession(title) {
+async function startSession(title, complementOf = null) {
   currentSession = {
     id: String(Date.now()),
     title: title || 'Sessão sem título',
@@ -92,6 +93,7 @@ async function startSession(title) {
     stoppedAt: null,
     steps: [],
     config: { captureScreenshots: true },
+    complementOf: complementOf || null,
   };
   await persistSession();
   await broadcastToTabs({ type: MSG.SESSION_UPDATED, session: currentSession });
@@ -554,6 +556,24 @@ ${sessionBlocks}
 Gera o documento completo em Markdown seguindo o formato e as regras do sistema.`;
 }
 
+function buildComplementPrompt(session, existingMarkdown) {
+  const newStepsText = buildSessionText(session);
+  const MAX = 40_000;
+  const existing = existingMarkdown.length > MAX
+    ? existingMarkdown.slice(0, MAX) + '\n[... documento truncado ...]'
+    : existingMarkdown;
+
+  return `DOCUMENTO EXISTENTE (gerado anteriormente — mantém a sua estrutura, secções, tom e idioma):
+---
+${existing}
+---
+
+NOVOS PASSOS GRAVADOS A INCORPORAR:
+${newStepsText}
+
+Atualiza o documento existente incorporando os novos passos. Expande ou modifica as secções já existentes quando relevante; adiciona novas secções para funcionalidades ainda não documentadas. Responde APENAS com o documento Markdown completo e atualizado.`;
+}
+
 async function generateDocument(sessionIds) {
   const data = await chrome.storage.local.get([
     'currentSession', 'sessionHistory',
@@ -618,12 +638,21 @@ async function generateDocument(sessionIds) {
     const filtered = withoutExcluded(session);
     if (!filtered.steps.length) return { error: 'Todos os passos estão excluídos. Inclui pelo menos um passo antes de gerar.' };
     sessions = [filtered];
-    pendingSession = filtered;
+    // Strip the large markdown from pendingSession (not needed for result page rendering)
+    const { complementOf, ...sessionForResult } = filtered;
+    pendingSession = complementOf
+      ? { ...sessionForResult, complementOf: { sessionId: complementOf.sessionId, title: complementOf.title } }
+      : filtered;
   }
 
-  const userMessage = sessions.length > 1
-    ? buildPrompt({ steps: [], title: '' }, template, buildMultiSessionText(sessions))
-    : buildPrompt(sessions[0], template);
+  let userMessage;
+  if (sessions.length === 1 && sessions[0].complementOf?.markdown) {
+    userMessage = buildComplementPrompt(sessions[0], sessions[0].complementOf.markdown);
+  } else if (sessions.length > 1) {
+    userMessage = buildPrompt({ steps: [], title: '' }, template, buildMultiSessionText(sessions));
+  } else {
+    userMessage = buildPrompt(sessions[0], template);
+  }
 
   try {
     let markdown;
@@ -685,6 +714,63 @@ chrome.commands.onCommand.addListener(command => {
 });
 
 // ── Message handler ───────────────────────────────────────────────────────────
+async function improveText(text) {
+  const data = await chrome.storage.local.get([
+    'settings', 'provider', 'anthropicKey', 'anthropicModel', 'openaiKey', 'openaiModel', 'apiKey',
+  ]);
+  const cfg      = data.settings || {};
+  const provider = cfg.provider || data.provider || 'anthropic';
+  const apiKey   = await getApiKey(provider, data);
+  if (!apiKey) throw new Error('Chave de API não configurada. Vai às definições e adiciona a tua chave.');
+
+  const model = provider === 'openai'
+    ? (cfg.openaiModel    || data.openaiModel    || 'gpt-4o')
+    : (cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5');
+
+  const systemPrompt =
+    'És um especialista em redação técnica em Português Europeu (PT-PT).\n' +
+    'Melhora o trecho de documentação que o utilizador enviar, mantendo:\n' +
+    '- O mesmo idioma (Português Europeu, PT-PT)\n' +
+    '- O mesmo tom formal e técnico\n' +
+    '- O mesmo comprimento aproximado\n' +
+    '- O mesmo significado e toda a informação original\n' +
+    'Responde APENAS com o texto melhorado, sem explicações nem formatação adicional.';
+
+  const userMessage = `Melhora este trecho de documentação técnica:\n\n${text}`;
+
+  if (provider === 'openai') {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model, max_tokens: 1024,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }],
+      }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `Erro OpenAI: ${res.status}`); }
+    const d = await res.json();
+    return d.choices[0].message.content.trim();
+  }
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model, max_tokens: 1024,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    }),
+  });
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `Erro Anthropic: ${res.status}`); }
+  const d = await res.json();
+  return d.content[0].text.trim();
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id ?? null;
 
@@ -695,7 +781,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.START_SESSION:
       (async () => {
-        const session = await startSession(message.title);
+        const session = await startSession(message.title, message.complementOf || null);
         // Inject tracker into the active tab in case the tab predates the extension
         try {
           const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -852,6 +938,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.storage.session.set({ unlockedKeys: uk });
         sendResponse({ ok: true });
       })();
+      return true;
+
+    case MSG.IMPROVE_TEXT:
+      improveText(message.text)
+        .then(improved => sendResponse({ improved }))
+        .catch(err    => sendResponse({ error: err.message }));
       return true;
   }
 });

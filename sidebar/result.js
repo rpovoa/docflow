@@ -29,6 +29,8 @@ const screenshotEls = new Map();
   renderScreenshots(usedStepIds);
   setupExports();
   setupLightbox();
+  setupImprove();
+  setupComplement();
 
   document.getElementById('loading').remove();
   document.getElementById('app').classList.remove('hidden');
@@ -167,13 +169,53 @@ function renderScreenshots(usedStepIds = new Set()) {
   });
 }
 
+// ── Complement ────────────────────────────────────────────────────────────────
+
+function setupComplement() {
+  const btn   = document.getElementById('btn-complement');
+  const toast = document.getElementById('complement-toast');
+
+  btn.addEventListener('click', async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'START_SESSION',
+        title: sessionData.title,
+        complementOf: {
+          sessionId: sessionData.id,
+          title:     sessionData.title,
+          markdown:  markdownContent,
+        },
+      });
+
+      btn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">' +
+        '<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>' +
+        '</svg> Gravação iniciada';
+      btn.classList.add('complement-active');
+
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 8000);
+    } catch (err) {
+      btn.disabled = false;
+      console.error('[DocFlow] Failed to start complement session:', err);
+    }
+  });
+}
+
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 
 function setupLightbox() {
   const lb = document.getElementById('lightbox');
   document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
   lb.addEventListener('click', e => { if (e.target === lb) closeLightbox(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (!document.getElementById('improve-overlay').classList.contains('hidden')) return;
+    closeLightbox();
+  });
 }
 
 function openLightbox(step) {
@@ -279,6 +321,138 @@ function buildHtmlExport() {
   <footer>Gerado com <strong>DocFlow</strong> em ${dateStr}</footer>
 </body>
 </html>`;
+}
+
+// ── Improve text feature ──────────────────────────────────────────────────────
+
+let improveRange        = null;
+let improveOriginalText = '';
+
+function setupImprove() {
+  const docContent = document.getElementById('document-content');
+  const triggerBtn = document.getElementById('btn-improve-trigger');
+  const overlay    = document.getElementById('improve-overlay');
+
+  // Show floating button when text is selected inside the document
+  docContent.addEventListener('mouseup', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) {
+      triggerBtn.classList.add('hidden');
+      return;
+    }
+    const text = sel.toString().trim();
+    if (text.length < 10) {
+      triggerBtn.classList.add('hidden');
+      return;
+    }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    triggerBtn.style.top  = `${rect.bottom + 8}px`;
+    triggerBtn.style.left = `${Math.max(0, Math.min(rect.left, window.innerWidth - 140))}px`;
+    triggerBtn.classList.remove('hidden');
+  });
+
+  // Hide button when clicking outside the document (but not when clicking the button itself)
+  document.addEventListener('mousedown', e => {
+    if (e.target === triggerBtn) return;
+    if (!e.target.closest('#document-content')) triggerBtn.classList.add('hidden');
+  });
+
+  // Open improve panel when button is clicked
+  triggerBtn.addEventListener('click', () => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    improveRange        = sel.getRangeAt(0).cloneRange();
+    improveOriginalText = sel.toString().trim();
+    sel.removeAllRanges();
+    triggerBtn.classList.add('hidden');
+    openImprovePanel();
+  });
+
+  // Close handlers
+  document.getElementById('improve-close').addEventListener('click', closeImprovePanel);
+  document.getElementById('improve-btn-cancel').addEventListener('click', closeImprovePanel);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeImprovePanel(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !overlay.classList.contains('hidden')) {
+      closeImprovePanel();
+      e.stopImmediatePropagation();
+    }
+  });
+
+  document.getElementById('improve-btn-retry').addEventListener('click', () => {
+    callImproveAI(improveOriginalText);
+  });
+
+  document.getElementById('improve-btn-accept').addEventListener('click', acceptImprovement);
+}
+
+function openImprovePanel() {
+  document.getElementById('improve-original').textContent  = improveOriginalText;
+  document.getElementById('improve-result').textContent    = '';
+  document.getElementById('improve-error').textContent     = '';
+  document.getElementById('improve-error').classList.add('hidden');
+  document.getElementById('improve-btn-accept').disabled   = true;
+  document.getElementById('improve-btn-retry').disabled    = true;
+  document.getElementById('improve-overlay').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  callImproveAI(improveOriginalText);
+}
+
+function closeImprovePanel() {
+  document.getElementById('improve-overlay').classList.add('hidden');
+  document.body.style.overflow = '';
+  improveRange = null;
+}
+
+async function callImproveAI(text) {
+  const loadingEl  = document.getElementById('improve-loading');
+  const resultEl   = document.getElementById('improve-result');
+  const errorEl    = document.getElementById('improve-error');
+  const acceptBtn  = document.getElementById('improve-btn-accept');
+  const retryBtn   = document.getElementById('improve-btn-retry');
+
+  loadingEl.classList.remove('hidden');
+  resultEl.textContent = '';
+  errorEl.classList.add('hidden');
+  acceptBtn.disabled = true;
+  retryBtn.disabled  = true;
+
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'IMPROVE_TEXT', text });
+    loadingEl.classList.add('hidden');
+    if (result.error) throw new Error(result.error);
+    resultEl.textContent = result.improved;
+    acceptBtn.disabled   = false;
+    retryBtn.disabled    = false;
+  } catch (err) {
+    loadingEl.classList.add('hidden');
+    errorEl.textContent = err.message || 'Erro ao melhorar texto. Tenta novamente.';
+    errorEl.classList.remove('hidden');
+    retryBtn.disabled = false;
+  }
+}
+
+function acceptImprovement() {
+  const improved = document.getElementById('improve-result').textContent.trim();
+  if (!improved || !improveRange) return;
+
+  // Replace selected range in the DOM
+  try {
+    improveRange.deleteContents();
+    const node = document.createTextNode(improved);
+    improveRange.insertNode(node);
+    improveRange.setStartAfter(node);
+    improveRange.collapse(true);
+  } catch (e) {
+    console.warn('[DocFlow] DOM replacement failed:', e);
+  }
+
+  // Best-effort update of the markdown source for exports
+  if (improveOriginalText && markdownContent.includes(improveOriginalText)) {
+    markdownContent = markdownContent.replace(improveOriginalText, improved);
+  }
+
+  closeImprovePanel();
 }
 
 // ── Markdown → HTML renderer ──────────────────────────────────────────────────

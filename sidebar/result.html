@@ -47,6 +47,12 @@
       <span class="header-title" id="header-title"></span>
 
       <div class="header-actions">
+        <button class="btn btn-outline" id="btn-complement" title="Gravar novos passos e incorporar neste documento">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
+          </svg>
+          Complementar
+        </button>
         <button class="btn btn-outline" id="btn-copy-md" title="Copiar Markdown para a área de transferência">
           <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
             <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/>
@@ -91,6 +97,56 @@
         </section>
       </main>
 
+    </div>
+  </div>
+
+  <!-- ── Complement toast ────────────────────────────────────────────────────── -->
+  <div class="complement-toast hidden" id="complement-toast">
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0;color:#22c55e">
+      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+    </svg>
+    <span>Sessão de complemento iniciada. Grava os novos passos e clica em <strong>Gerar Documento</strong> na extensão.</span>
+  </div>
+
+  <!-- ── Improve selection button ────────────────────────────────────────────── -->
+  <button class="improve-trigger hidden" id="btn-improve-trigger" title="Melhorar texto selecionado">
+    ✨ Melhorar
+  </button>
+
+  <!-- ── Improve panel ────────────────────────────────────────────────────────── -->
+  <div class="improve-overlay hidden" id="improve-overlay" role="dialog" aria-modal="true">
+    <div class="improve-panel">
+      <div class="improve-panel-header">
+        <span class="improve-panel-title">✨ Melhorar texto</span>
+        <button class="improve-close" id="improve-close" aria-label="Fechar">✕</button>
+      </div>
+
+      <div class="improve-cols">
+        <div class="improve-col improve-col-original">
+          <div class="improve-col-label">Original</div>
+          <div class="improve-text-box" id="improve-original"></div>
+        </div>
+        <div class="improve-divider">→</div>
+        <div class="improve-col improve-col-suggestion">
+          <div class="improve-col-label">Sugestão</div>
+          <div class="improve-text-box" id="improve-suggestion">
+            <div class="improve-loading hidden" id="improve-loading">
+              <div class="spinner"></div>
+              <span>A melhorar...</span>
+            </div>
+            <div id="improve-result"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="improve-error hidden" id="improve-error"></div>
+
+      <div class="improve-actions">
+        <button class="btn btn-outline" id="improve-btn-retry" disabled>↻ Nova versão</button>
+        <div style="flex:1"></div>
+        <button class="btn btn-outline" id="improve-btn-cancel">Cancelar</button>
+        <button class="btn btn-accept" id="improve-btn-accept" disabled>✓ Aceitar</button>
+      </div>
     </div>
   </div>
 
