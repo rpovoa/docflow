@@ -503,6 +503,157 @@ async function loadDefaultStyleGuide() {
   }
 }
 
+// ── ZIP parser & document extractors ─────────────────────────────────────────
+
+async function parseZip(arrayBuffer) {
+  const data = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+
+  // Find End of Central Directory (EOCD) — scan from end, allowing up to 65535 byte comment
+  let eocd = -1;
+  for (let i = data.length - 22; i >= Math.max(0, data.length - 65558); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd === -1) throw new Error('Not a valid ZIP');
+
+  const cdCount  = view.getUint16(eocd + 8,  true);
+  const cdOffset = view.getUint32(eocd + 16, true);
+
+  // Index all central directory entries by filename
+  const index = new Map();
+  let pos = cdOffset;
+  for (let i = 0; i < cdCount; i++) {
+    if (pos + 46 > data.length || view.getUint32(pos, true) !== 0x02014b50) break;
+    const method     = view.getUint16(pos + 10, true);
+    const compSize   = view.getUint32(pos + 20, true);
+    const nameLen    = view.getUint16(pos + 28, true);
+    const extraLen   = view.getUint16(pos + 30, true);
+    const commentLen = view.getUint16(pos + 32, true);
+    const localOff   = view.getUint32(pos + 42, true);
+    const name       = new TextDecoder().decode(data.slice(pos + 46, pos + 46 + nameLen));
+    index.set(name, { localOff, method, compSize });
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return {
+    list: () => [...index.keys()],
+    async getFile(name) {
+      const entry = index.get(name);
+      if (!entry) return null;
+      // Local file header: extra field length may differ from central directory
+      const localNameLen  = view.getUint16(entry.localOff + 26, true);
+      const localExtraLen = view.getUint16(entry.localOff + 28, true);
+      const dataStart     = entry.localOff + 30 + localNameLen + localExtraLen;
+      const compressed    = data.slice(dataStart, dataStart + entry.compSize);
+      if (entry.method === 0) return compressed; // stored
+      if (entry.method === 8) {                  // deflate
+        const ds = new DecompressionStream('deflate-raw');
+        const w = ds.writable.getWriter();
+        const r = ds.readable.getReader();
+        w.write(compressed); w.close();
+        const chunks = [];
+        for (;;) { const { done, value } = await r.read(); if (done) break; chunks.push(value); }
+        const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+        let off = 0;
+        for (const c of chunks) { out.set(c, off); off += c.length; }
+        return out;
+      }
+      return null;
+    },
+  };
+}
+
+async function extractDocxText(arrayBuffer) {
+  try {
+    const zip = await parseZip(arrayBuffer);
+    const buf = await zip.getFile('word/document.xml');
+    if (!buf) return null;
+    return new TextDecoder().decode(buf)
+      .replace(/<w:br[^/]*/>/g,  '\n')
+      .replace(/<w:tab[^/]*/>/g, '\t')
+      .replace(/<\/w:p>/g,  '\n')
+      .replace(/<\/w:tc>/g, '\t')
+      .replace(/<[^>]+>/g,  '')
+      .replace(/\t\n/g,     '\n')
+      .replace(/\n{3,}/g,   '\n\n')
+      .trim() || null;
+  } catch (_) { return null; }
+}
+
+async function extractXlsxText(arrayBuffer) {
+  try {
+    const zip = await parseZip(arrayBuffer);
+
+    // Load shared strings (string cells reference these by index)
+    const ssBuf = await zip.getFile('xl/sharedStrings.xml');
+    const sharedStrings = [];
+    if (ssBuf) {
+      const xml = new TextDecoder().decode(ssBuf);
+      const re = /<si>([\s\S]*?)<\/si>/g;
+      let m;
+      while ((m = re.exec(xml)) !== null)
+        sharedStrings.push(m[1].replace(/<[^>]+>/g, '').trim());
+    }
+
+    // Read sheets sequentially (sheet1.xml, sheet2.xml, …)
+    const rows = [];
+    for (let i = 1; i <= 20; i++) {
+      const buf = await zip.getFile(`xl/worksheets/sheet${i}.xml`);
+      if (!buf) break;
+      const xml = new TextDecoder().decode(buf);
+      const rowRe = /<row[^>]*>([\s\S]*?)<\/row>/g;
+      let rowM;
+      while ((rowM = rowRe.exec(xml)) !== null) {
+        const cells = [];
+        const cellRe = /<c([^>]*)>([\s\S]*?)<\/c>/g;
+        let cM;
+        while ((cM = cellRe.exec(rowM[1])) !== null) {
+          const isStr = /t="s"/.test(cM[1]);
+          const v = /<v>([^<]*)<\/v>/.exec(cM[2]);
+          cells.push(v ? (isStr ? (sharedStrings[+v[1]] ?? v[1]) : v[1]) : '');
+        }
+        if (cells.some(c => c)) rows.push(cells.join('\t'));
+      }
+    }
+    return rows.join('\n') || null;
+  } catch (_) { return null; }
+}
+
+async function loadReferenceKnowledge() {
+  try {
+    const res = await fetch(chrome.runtime.getURL('docs/reference/index.json'));
+    if (!res.ok) return null;
+    const { files } = await res.json();
+    if (!Array.isArray(files) || !files.length) return null;
+
+    const MAX = 30_000;
+    const parts = [];
+    let total = 0;
+
+    for (const entry of files) {
+      if (total >= MAX) break;
+      try {
+        const fileRes = await fetch(chrome.runtime.getURL(`docs/reference/${entry.name}`));
+        if (!fileRes.ok) continue;
+        const ext = entry.name.split('.').pop().toLowerCase();
+        let text = null;
+        if      (ext === 'docx')                    text = await extractDocxText(await fileRes.arrayBuffer());
+        else if (ext === 'xlsx')                    text = await extractXlsxText(await fileRes.arrayBuffer());
+        else if (['txt', 'md', 'csv'].includes(ext)) text = await fileRes.text();
+        if (!text?.trim()) continue;
+        const label = entry.label || entry.name;
+        const chunk = `### ${label}\n${text.trim()}`;
+        const remaining = MAX - total;
+        parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '...' : chunk);
+        total += Math.min(chunk.length, remaining);
+      } catch (e) {
+        console.warn(`[DocFlow] Erro ao carregar referência "${entry.name}":`, e.message);
+      }
+    }
+    return parts.length ? parts.join('\n\n') : null;
+  } catch (_) { return null; }
+}
+
 // Returns a copy of the session with excluded steps removed and indices reset
 function withoutExcluded(session) {
   const steps = session.steps
@@ -652,6 +803,17 @@ async function generateDocument(sessionIds) {
     userMessage = buildPrompt({ steps: [], title: '' }, template, buildMultiSessionText(sessions));
   } else {
     userMessage = buildPrompt(sessions[0], template);
+  }
+
+  // Prepend reference knowledge if available
+  const referenceKnowledge = await loadReferenceKnowledge();
+  if (referenceKnowledge) {
+    userMessage =
+      'CONHECIMENTO DE REFERÊNCIA DA ORGANIZAÇÃO ' +
+      '(terminologia, definições de campos, regras de negócio — ' +
+      'usa este conteúdo para enriquecer a documentação com detalhes precisos do sistema):\n' +
+      '---\n' + referenceKnowledge + '\n---\n\n' +
+      userMessage;
   }
 
   try {
