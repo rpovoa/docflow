@@ -52,5 +52,29 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "docs/reference/ExemploManual.docx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_15042026_vs_24042026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backlog_Gestão_de_Acessos_v1.0_vs_02022026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.2_30032026_vs_14042026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.2_26032026_vs_14042026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_25022026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_vs_02022026.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.3_30122025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.5_04122025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.2_04112025_vs_25112025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_13112025_vs_25112025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.2_03102025_vs_27102025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_250925_vs_09102025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_120925_vs_19092025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_290825_vs_05092025.xlsx",
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_270825_vs_03092025_vs_05092025.xlsx"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

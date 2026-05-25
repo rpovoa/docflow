@@ -22,6 +22,8 @@ const MSG = {
   REMOVE_KEY:        'REMOVE_KEY',
   ADD_NARRATION:     'ADD_NARRATION',
   IMPROVE_TEXT:      'IMPROVE_TEXT',
+  DELETE_STEP:       'DELETE_STEP',
+  STOP_AND_GENERATE: 'STOP_AND_GENERATE',
 };
 
 const MAX_HISTORY = 15;
@@ -132,6 +134,21 @@ async function undoLastStep() {
   return { session: currentSession };
 }
 
+async function deleteStep(stepId) {
+  if (!currentSession?.steps.length) return { session: currentSession };
+  const idx = currentSession.steps.findIndex(s => s.id === stepId);
+  if (idx === -1) return { session: currentSession };
+  currentSession.steps.splice(idx, 1);
+  currentSession.steps.forEach((s, i) => { s.index = i + 1; });
+  await persistSession();
+  const data = await chrome.storage.local.get(['sessionHistory']);
+  const history = (data.sessionHistory || []).map(s =>
+    s.id === currentSession.id ? currentSession : s
+  );
+  await chrome.storage.local.set({ sessionHistory: history });
+  return { session: currentSession };
+}
+
 async function resumeSession(sessionId) {
   // Stop any in-progress session first
   if (currentSession && !currentSession.stoppedAt) {
@@ -178,11 +195,29 @@ async function addStep(stepData, tabId) {
 
   const sd = await chrome.storage.local.get(['settings', 'captureScreenshots']);
   const _s = sd.settings || {};
-  const shouldCapture =
+  const screenshotsEnabled =
     (_s.captureScreenshots !== undefined ? _s.captureScreenshots : sd.captureScreenshots !== false) &&
     currentSession.config.captureScreenshots &&
-    tabId != null &&
-    ['click', 'input', 'select', 'screenshot'].includes(stepData.type);
+    tabId != null;
+
+  // Capture only on events that mark a meaningful screen change:
+  //   • manual screenshot  — always
+  //   • navigation         — new screen appeared; wait briefly for SPA to render
+  //   • click on a button/link — likely a primary action; input/select clicks are omitted
+  const isMeaningfulClick =
+    stepData.type === 'click' &&
+    (['button', 'a', 'summary'].includes(stepData.element?.tag) ||
+     ['submit', 'button', 'reset'].includes(stepData.element?.type) ||
+     stepData.element?.href != null);
+
+  const shouldCapture =
+    screenshotsEnabled &&
+    (stepData.type === 'screenshot' || stepData.type === 'navigation' || isMeaningfulClick);
+
+  // For navigation events give the SPA 400 ms to render the new view before capturing
+  if (shouldCapture && stepData.type === 'navigation') {
+    await new Promise(r => setTimeout(r, 400));
+  }
 
   const screenshot = shouldCapture ? await captureScreenshot(tabId) : null;
 
@@ -313,14 +348,30 @@ function formatStep(step) {
   return parts.join(' ');
 }
 
+function getPathname(url) {
+  try { const u = new URL(url); return u.pathname + u.hash; } catch (_) { return ''; }
+}
+
 function groupStepsByScreen(steps) {
-  // Group consecutive steps by pageTitle to help the AI identify screens
+  // When the SPA keeps the same document.title across all routes, fall back to
+  // pathname+hash as the screen discriminator so each route gets its own section.
+  const titles = new Set(steps.map(s => s.pageTitle).filter(Boolean));
+  const titleChanges = titles.size > 1;
+
   const groups = [];
   let current = null;
+
   for (const step of steps) {
-    const screen = step.pageTitle || '—';
-    if (!current || current.screen !== screen) {
-      current = { screen, steps: [] };
+    const title    = step.pageTitle || '—';
+    const pathname = getPathname(step.url);
+
+    // Primary key: title when it distinguishes screens; pathname otherwise
+    const key   = titleChanges ? title : (title + '|' + pathname);
+    // Display label for the prompt header
+    const label = titleChanges ? title : (pathname || title);
+
+    if (!current || current.key !== key) {
+      current = { key, label, steps: [] };
       groups.push(current);
     }
     current.steps.push(step);
@@ -346,7 +397,8 @@ function buildSessionText(session) {
   // Group by screen so the AI understands the screen structure
   const screenGroups = groupStepsByScreen(actionableSteps);
   const stepsText = screenGroups.map(group => {
-    const header = group.screen !== '—' ? `--- Ecrã: ${group.screen} ---` : '--- (ecrã desconhecido) ---';
+    const label  = group.label || '—';
+    const header = label !== '—' ? `--- Ecrã: ${label} ---` : '--- (ecrã desconhecido) ---';
     return header + '\n' + group.steps.map(formatStep).join('\n');
   }).join('\n\n');
 
@@ -569,8 +621,8 @@ async function extractDocxText(arrayBuffer) {
     const buf = await zip.getFile('word/document.xml');
     if (!buf) return null;
     return new TextDecoder().decode(buf)
-      .replace(/<w:br[^/]*/>/g,  '\n')
-      .replace(/<w:tab[^/]*/>/g, '\t')
+      .replace(/<w:br[^>]*>/g,  '\n')
+      .replace(/<w:tab[^>]*>/g, '\t')
       .replace(/<\/w:p>/g,  '\n')
       .replace(/<\/w:tc>/g, '\t')
       .replace(/<[^>]+>/g,  '')
@@ -621,33 +673,41 @@ async function extractXlsxText(arrayBuffer) {
 
 async function loadReferenceKnowledge() {
   try {
-    const res = await fetch(chrome.runtime.getURL('docs/reference/index.json'));
-    if (!res.ok) return null;
-    const { files } = await res.json();
-    if (!Array.isArray(files) || !files.length) return null;
+    // Discover reference files from web_accessible_resources in manifest.json
+    // (no index file needed — just add the path to manifest.json + reload)
+    const war = chrome.runtime.getManifest().web_accessible_resources || [];
+    const refPaths = war
+      .flatMap(entry => Array.isArray(entry.resources) ? entry.resources : [])
+      .filter(r =>
+        r.startsWith('docs/reference/') &&
+        !r.endsWith('style-guide.md') &&
+        !r.includes('*')
+      );
+
+    if (!refPaths.length) return null;
 
     const MAX = 30_000;
     const parts = [];
     let total = 0;
 
-    for (const entry of files) {
+    for (const path of refPaths) {
       if (total >= MAX) break;
       try {
-        const fileRes = await fetch(chrome.runtime.getURL(`docs/reference/${entry.name}`));
-        if (!fileRes.ok) continue;
-        const ext = entry.name.split('.').pop().toLowerCase();
+        const res = await fetch(chrome.runtime.getURL(path));
+        if (!res.ok) continue;
+        const name = path.split('/').pop();
+        const ext  = name.split('.').pop().toLowerCase();
         let text = null;
-        if      (ext === 'docx')                    text = await extractDocxText(await fileRes.arrayBuffer());
-        else if (ext === 'xlsx')                    text = await extractXlsxText(await fileRes.arrayBuffer());
-        else if (['txt', 'md', 'csv'].includes(ext)) text = await fileRes.text();
+        if      (ext === 'docx')                      text = await extractDocxText(await res.arrayBuffer());
+        else if (ext === 'xlsx')                      text = await extractXlsxText(await res.arrayBuffer());
+        else if (['txt', 'md', 'csv'].includes(ext))  text = await res.text();
         if (!text?.trim()) continue;
-        const label = entry.label || entry.name;
-        const chunk = `### ${label}\n${text.trim()}`;
+        const chunk = `### ${name}\n${text.trim()}`;
         const remaining = MAX - total;
         parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '...' : chunk);
         total += Math.min(chunk.length, remaining);
       } catch (e) {
-        console.warn(`[DocFlow] Erro ao carregar referência "${entry.name}":`, e.message);
+        console.warn(`[DocFlow] Erro ao carregar referência "${path}":`, e.message);
       }
     }
     return parts.length ? parts.join('\n\n') : null;
@@ -681,7 +741,8 @@ function buildMultiSessionText(sessions) {
 
     const screenGroups = groupStepsByScreen(reindexed);
     const stepsText = screenGroups.map(group => {
-      const header = group.screen !== '—' ? `--- Ecrã: ${group.screen} ---` : '--- (ecrã desconhecido) ---';
+      const label  = group.label || '—';
+      const header = label !== '—' ? `--- Ecrã: ${label} ---` : '--- (ecrã desconhecido) ---';
       return header + '\n' + group.steps.map(formatStep).join('\n');
     }).join('\n\n');
 
@@ -1012,6 +1073,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.UNDO_LAST_STEP:
       undoLastStep().then(result => sendResponse(result));
+      return true;
+
+    case MSG.DELETE_STEP:
+      deleteStep(message.stepId).then(result => sendResponse(result));
+      return true;
+
+    case MSG.STOP_AND_GENERATE:
+      (async () => {
+        await stopSession();
+        const result = await generateDocument(null);
+        if (!result?.error) {
+          try { await chrome.tabs.create({ url: chrome.runtime.getURL('sidebar/result.html') }); } catch (_) {}
+        }
+        sendResponse(result || {});
+      })();
       return true;
 
     case MSG.TOGGLE_PAUSE:

@@ -19,20 +19,36 @@
   let lastClickTime = 0;
   const CLICK_DEDUP_MS = 1500;
 
+  // Local step log for the mini-feed (no IDs needed)
+  let recentSteps = [];
+
   // ── Element metadata ──────────────────────────────────────────────────────
 
   function extractLabel(el) {
+    // aria-label is the most explicit and reliable
     const ariaLabel = el.getAttribute('aria-label');
     if (ariaLabel) return ariaLabel.trim();
+
+    // Associated <label> element
     if (el.id) {
-      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (label) return label.textContent.trim().slice(0, 120);
+      const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (lbl) return (lbl.innerText || lbl.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
     }
-    if (el.placeholder) return el.placeholder.trim();
-    const text = (el.textContent || '').trim();
-    if (text) return text.slice(0, 120);
+
+    // Placeholder for inputs
+    if (el.placeholder) return el.placeholder.trim().slice(0, 80);
+
+    // Visible rendered text — innerText respects CSS visibility and excludes hidden nodes
+    const inner = (el.innerText || '').trim().replace(/\s+/g, ' ');
+    if (inner) return inner.slice(0, 80);
+
+    // Fallback attributes
     if (el.getAttribute('alt'))   return el.getAttribute('alt').trim();
     if (el.getAttribute('title')) return el.getAttribute('title').trim();
+
+    // For input[type=submit] / input[type=button]
+    if (el.value) return String(el.value).trim().slice(0, 80);
+
     return el.tagName.toLowerCase();
   }
 
@@ -55,6 +71,12 @@
       step: { ...stepData, url: window.location.href, pageTitle: document.title },
     }).then(resp => {
       if (resp?.stepCount != null) updateStepCount(resp.stepCount);
+      recentSteps.push({
+        type:  stepData.type,
+        label: stepData.element?.label || stepData.note || document.title || stepData.type,
+      });
+      if (recentSteps.length > 10) recentSteps.shift();
+      updateMiniFeed();
     }).catch(() => {});
   }
 
@@ -426,6 +448,104 @@
       line-height:1.4;
       min-height:14px;
     }
+
+    /* ── Stop & Generate ── */
+    .btn-stop-gen{
+      background:rgba(99,102,241,.18);
+      border:1px solid rgba(99,102,241,.38);
+      color:#c4b5fd;
+    }
+    .btn-stop-gen:hover:not(:disabled){background:rgba(99,102,241,.3)}
+
+    /* ── Mini feed ── */
+    .mini-feed{
+      display:flex;
+      flex-direction:column;
+      gap:1px;
+      padding:2px 0;
+    }
+    .feed-item{
+      font-size:10.5px;
+      color:#6b7280;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      line-height:1.45;
+    }
+    .feed-latest{color:#9ca3af}
+
+    /* ── Steps expand ── */
+    .steps-toggle{
+      font-size:10px;
+      color:#4b5563;
+      cursor:pointer;
+      user-select:none;
+      text-align:center;
+      padding:2px 0;
+      display:block;
+      transition:color .12s;
+    }
+    .steps-toggle:hover{color:#9ca3af}
+
+    .steps-full{
+      display:flex;
+      flex-direction:column;
+      gap:1px;
+      max-height:112px;
+      overflow-y:auto;
+      padding:2px 0;
+      scrollbar-width:thin;
+      scrollbar-color:rgba(255,255,255,.08) transparent;
+    }
+    .step-item{
+      display:flex;
+      align-items:center;
+      gap:4px;
+      padding:2px 2px;
+      border-radius:4px;
+      min-width:0;
+    }
+    .step-item:hover{background:rgba(255,255,255,.06)}
+    .step-item-num{
+      font-size:9px;
+      color:#374151;
+      width:14px;
+      text-align:right;
+      flex-shrink:0;
+    }
+    .step-item-label{
+      flex:1;
+      font-size:10.5px;
+      color:#6b7280;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .step-del-btn{
+      flex-shrink:0;
+      background:none;
+      border:none;
+      cursor:pointer;
+      color:transparent;
+      font-size:12px;
+      padding:0 2px;
+      line-height:1;
+      border-radius:3px;
+      transition:color .12s;
+    }
+    .step-item:hover .step-del-btn{color:#4b5563}
+    .step-del-btn:hover{color:#f87171!important}
+
+    /* ── Stop-gen error ── */
+    .stop-gen-error{
+      font-size:11px;
+      color:#fca5a5;
+      background:rgba(239,68,68,.08);
+      border:1px solid rgba(239,68,68,.2);
+      border-radius:6px;
+      padding:6px 8px;
+      text-align:center;
+    }
   `;
 
   function escHtml(s) {
@@ -452,6 +572,9 @@
             <span class="step-num" id="df-count">0</span>
             passos gravados
           </div>
+          <div class="mini-feed hidden" id="df-feed"></div>
+          <span class="steps-toggle hidden" id="df-steps-toggle">Ver passos ▾</span>
+          <div class="steps-full hidden" id="df-steps-full"></div>
           <div class="divider"></div>
           <button class="btn btn-pause" id="df-pause">⏸ Pausar gravação</button>
           <div class="btn-row">
@@ -473,6 +596,7 @@
             <span class="narration-text" id="df-narration-text">A ouvir...</span>
           </div>
           <div class="divider"></div>
+          <button class="btn btn-stop-gen" id="df-stop-gen">✨ Parar e Gerar</button>
           <button class="btn btn-stop" id="df-stop">⏹ Parar Sessão</button>
           <div class="stop-confirm hidden" id="df-stop-confirm">
             <span>Encerrar a sessão?</span>
@@ -481,6 +605,7 @@
               <button class="btn btn-danger" id="df-stop-do">Encerrar</button>
             </div>
           </div>
+          <div class="stop-gen-error hidden" id="df-stop-gen-error"></div>
         </div>
       </div>
     `;
@@ -494,6 +619,48 @@
     stepCount = count;
     const el = dfEl('df-count');
     if (el) el.textContent = count;
+    if (count > 0) dfEl('df-steps-toggle')?.classList.remove('hidden');
+  }
+
+  function stepIcon(type) {
+    return { click: '→', input: '✎', select: '⇩', navigation: '⤻', manual: '📝', screenshot: '📸', narration: '🎙' }[type] || '·';
+  }
+
+  function updateMiniFeed() {
+    const feed = dfEl('df-feed');
+    if (!feed) return;
+    const items = recentSteps.slice(-3);
+    if (!items.length) { feed.classList.add('hidden'); return; }
+    feed.classList.remove('hidden');
+    feed.innerHTML = items.map((s, i) => {
+      const isLatest = i === items.length - 1;
+      const label = s.label || s.type;
+      return `<div class="feed-item${isLatest ? ' feed-latest' : ''}">${escHtml(stepIcon(s.type) + ' ' + label)}</div>`;
+    }).join('');
+  }
+
+  async function loadAndRenderSteps() {
+    const list = dfEl('df-steps-full');
+    if (!list) return;
+    list.innerHTML = '<div class="step-item-label" style="padding:3px 2px;font-size:10px;color:#4b5563">A carregar...</div>';
+    const resp  = await chrome.runtime.sendMessage({ type: 'GET_SESSION' }).catch(() => null);
+    const steps = resp?.session?.steps || [];
+    list.innerHTML = '';
+    if (!steps.length) {
+      list.innerHTML = '<div class="step-item-label" style="padding:3px 2px;font-size:10px;color:#4b5563">Nenhum passo gravado</div>';
+      return;
+    }
+    steps.forEach(step => {
+      const label = step.element?.label || step.note || step.pageTitle || step.type;
+      const item  = document.createElement('div');
+      item.className = 'step-item';
+      item.dataset.stepId = step.id;
+      item.innerHTML =
+        `<span class="step-item-num">${step.index}</span>` +
+        `<span class="step-item-label" title="${escHtml(label)}">${escHtml(stepIcon(step.type) + ' ' + label)}</span>` +
+        `<button class="step-del-btn" data-step-id="${escHtml(step.id)}" title="Remover passo">×</button>`;
+      list.appendChild(item);
+    });
   }
 
   function updatePauseUI() {
@@ -639,6 +806,15 @@
 
     updateStepCount(session?.steps?.length || 0);
     updatePauseUI();
+
+    // Seed mini-feed from existing steps when resuming a session
+    if (session?.steps?.length) {
+      recentSteps = session.steps.slice(-10).map(s => ({
+        type: s.type, label: s.element?.label || s.note || s.pageTitle || s.type,
+      }));
+      updateMiniFeed();
+    }
+
     setupSidebarListeners();
     setupDrag();
   }
@@ -732,6 +908,69 @@
     dfEl('df-mic').addEventListener('click', () => {
       if (isNarrating) stopNarration();
       else startNarration();
+    });
+
+    // Stop & Generate — one-click flow via service worker
+    dfEl('df-stop-gen').addEventListener('click', async () => {
+      const btn    = dfEl('df-stop-gen');
+      const errEl  = dfEl('df-stop-gen-error');
+      btn.disabled = true;
+      btn.textContent = '⏳ A gerar...';
+      if (errEl) errEl.classList.add('hidden');
+
+      const result = await chrome.runtime.sendMessage({ type: 'STOP_AND_GENERATE' })
+        .catch(() => ({ error: 'Erro de comunicação' }));
+
+      // Sidebar may have been removed already — use alert for errors
+      if (result?.error) {
+        if (errEl && sidebarRoot) {
+          errEl.textContent = result.error;
+          errEl.classList.remove('hidden');
+          if (btn && sidebarRoot) { btn.disabled = false; btn.textContent = '✨ Parar e Gerar'; }
+        } else {
+          window.alert('DocFlow: ' + result.error);
+        }
+      }
+    });
+
+    // Steps toggle
+    dfEl('df-steps-toggle').addEventListener('click', async () => {
+      const toggle = dfEl('df-steps-toggle');
+      const list   = dfEl('df-steps-full');
+      if (!list.classList.contains('hidden')) {
+        list.classList.add('hidden');
+        toggle.textContent = 'Ver passos ▾';
+      } else {
+        await loadAndRenderSteps();
+        list.classList.remove('hidden');
+        toggle.textContent = 'Ocultar ▴';
+      }
+    });
+
+    // Step delete (event delegation)
+    dfEl('df-steps-full').addEventListener('click', async e => {
+      const btn = e.target.closest('.step-del-btn');
+      if (!btn) return;
+      const stepId = btn.dataset.stepId;
+      if (!stepId) return;
+      btn.disabled = true;
+      const resp = await chrome.runtime.sendMessage({ type: 'DELETE_STEP', stepId }).catch(() => null);
+      if (resp?.session != null) {
+        updateStepCount(resp.session.steps.length);
+        const item = dfEl('df-steps-full')?.querySelector(`[data-step-id="${stepId}"]`);
+        if (item) {
+          item.remove();
+          dfEl('df-steps-full')?.querySelectorAll('.step-item').forEach((el, i) => {
+            el.querySelector('.step-item-num').textContent = i + 1;
+          });
+        }
+        recentSteps = resp.session.steps.slice(-10).map(s => ({
+          type: s.type, label: s.element?.label || s.note || s.pageTitle || s.type,
+        }));
+        updateMiniFeed();
+      } else {
+        btn.disabled = false;
+      }
     });
 
     // Stop — show inline confirmation

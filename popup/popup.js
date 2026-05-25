@@ -458,4 +458,13 @@ $('btn-open-dashboard-header').addEventListener('click', () => {
   render(session);
   await restoreUIState(session);
   await refreshHistoryBadge();
+
+  // Auto-fill title from the active tab when idle and the input is empty
+  if (!session && !sessionTitleInput.value.trim()) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const skip = ['New Tab', chrome.runtime.getManifest().name];
+    if (tab?.title && !skip.includes(tab.title)) {
+      sessionTitleInput.value = tab.title.slice(0, 60);
+    }
+  }
 })();
