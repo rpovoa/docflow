@@ -13,6 +13,10 @@ let activeView     = 'sessions'; // 'sessions' | 'settings'
 let settingsData   = null;       // cached settings from SW
 let settingsProvider = 'anthropic';
 
+// Step inline editing state
+let editingStepId      = null;
+let stepEditScreenshot = {}; // stepId → dataURL | null (remove) | undefined (unchanged)
+
 const $ = id => document.getElementById(id);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -229,11 +233,65 @@ function renderSteps() {
   steps.forEach(step => {
     const excluded = !!step.excluded;
     const row = document.createElement('div');
+    const icon = stepIcon(step.type);
+
+    // ── Edit mode ──────────────────────────────────────────────────────────────
+    if (editingStepId === step.id) {
+      row.className = 'step-row step-editing';
+      const currentText = getStepEditText(step);
+      const placeholder = getStepEditPlaceholder(step);
+      const canEditText = step.type !== 'screenshot';
+      const imgSrc = stepEditScreenshot.hasOwnProperty(step.id)
+        ? stepEditScreenshot[step.id]
+        : step.screenshot;
+
+      const textSection = canEditText
+        ? `<div>` +
+          `<div class="step-edit-section-label">Texto</div>` +
+          `<textarea class="step-edit-input" id="edit-text-${escAttr(step.id)}" rows="2" ` +
+            `placeholder="${escAttr(placeholder)}">${escHtml(currentText)}</textarea>` +
+          `</div>`
+        : '';
+
+      const imgSection =
+        `<div class="step-edit-img-section">` +
+          (imgSrc
+            ? `<img class="step-edit-img-preview" src="${escAttr(imgSrc)}" alt="Screenshot">`
+            : `<div class="step-edit-img-placeholder">📷</div>`) +
+          `<div class="step-edit-img-info">` +
+            `<div class="step-edit-img-section-label step-edit-section-label">Screenshot</div>` +
+            `<div class="step-edit-img-status">${imgSrc ? 'Screenshot atual' : 'Sem screenshot'}</div>` +
+            `<div class="step-edit-img-btns">` +
+              `<label class="btn btn-outline btn-sm step-edit-file-label" for="edit-img-input-${escAttr(step.id)}" style="cursor:pointer">` +
+                (imgSrc ? '↺ Substituir' : '+ Adicionar') +
+              `</label>` +
+              `<input type="file" id="edit-img-input-${escAttr(step.id)}" ` +
+                `class="step-edit-file-input hidden" accept="image/*" data-step-id="${escAttr(step.id)}">` +
+              (imgSrc ? `<button class="btn btn-ghost btn-sm" data-remove-img="${escAttr(step.id)}">Remover</button>` : '') +
+            `</div>` +
+          `</div>` +
+        `</div>`;
+
+      row.innerHTML =
+        `<span class="step-row-num">${step.index}</span>` +
+        `<span class="step-row-icon">${icon}</span>` +
+        `<div class="step-edit-form">` +
+          textSection + imgSection +
+          `<div class="step-edit-actions">` +
+            `<button class="btn btn-primary btn-sm" data-save-edit="${escAttr(step.id)}">Guardar</button>` +
+            `<button class="btn btn-ghost btn-sm" data-cancel-edit="${escAttr(step.id)}">Cancelar</button>` +
+          `</div>` +
+        `</div>`;
+
+      list.appendChild(row);
+      return; // skip normal render for this step
+    }
+
+    // ── Normal render ──────────────────────────────────────────────────────────
     row.className = 'step-row' +
       (step.screenshot && !excluded ? ' has-shot' : '') +
       (excluded ? ' step-excluded' : '');
 
-    const icon  = stepIcon(step.type);
     const label = buildStepLabel(step);
 
     const thumbHtml = step.screenshot && !excluded
@@ -243,13 +301,16 @@ function renderSteps() {
         `</div>`
       : '';
 
-    // Exclude toggle only for stopped sessions
     const toggleHtml = !isRecording
       ? `<button class="step-exclude-btn${excluded ? ' is-excluded' : ''}" ` +
         `data-id="${escAttr(step.id)}" ` +
         `title="${excluded ? 'Reincluir no documento' : 'Excluir do documento'}">` +
         (excluded ? '↩' : '⊘') +
         `</button>`
+      : '';
+
+    const editBtnHtml = !isRecording
+      ? `<button class="step-edit-btn" data-edit-step="${escAttr(step.id)}" title="Editar passo">✏</button>`
       : '';
 
     row.innerHTML =
@@ -261,7 +322,7 @@ function renderSteps() {
       `</div>` +
       (excluded ? `<span class="step-excluded-badge">Excluído</span>` : '') +
       thumbHtml +
-      toggleHtml;
+      toggleHtml + editBtnHtml;
 
     if (step.screenshot && !excluded) {
       row.querySelector('.thumb-wrap').addEventListener('click', () =>
@@ -273,10 +334,16 @@ function renderSteps() {
       row.querySelector('.step-exclude-btn').addEventListener('click', () =>
         toggleStepExclude(step.id)
       );
+      row.querySelector('.step-edit-btn').addEventListener('click', () =>
+        openStepEdit(step.id)
+      );
     }
 
     list.appendChild(row);
   });
+
+  // Attach file-input listeners for any open edit form
+  attachStepEditFileListeners();
 
   // Update generate button label to reflect excluded count
   const excludedCount = steps.filter(s => s.excluded).length;
@@ -303,6 +370,145 @@ async function toggleStepExclude(stepId) {
 
   renderSteps();
   renderSidebar();
+}
+
+// ── Step inline editing ────────────────────────────────────────────────────────
+
+function getStepEditText(step) {
+  if (step.type === 'manual' || step.type === 'narration') return step.note || '';
+  if (step.type === 'navigation') return step.pageTitle || '';
+  return step.element?.label || '';
+}
+
+function getStepEditPlaceholder(step) {
+  if (step.type === 'manual' || step.type === 'narration') return 'Texto da nota...';
+  if (step.type === 'navigation') return 'Título da página...';
+  if (step.type === 'screenshot') return '—';
+  return 'Rótulo do elemento...';
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function openStepEdit(stepId) {
+  editingStepId = stepId;
+  renderSteps();
+  setTimeout(() => {
+    const ta = document.querySelector('.step-edit-input');
+    if (ta) { ta.focus(); ta.select(); }
+  }, 0);
+}
+
+function closeStepEdit() {
+  if (editingStepId) delete stepEditScreenshot[editingStepId];
+  editingStepId = null;
+  renderSteps();
+}
+
+async function saveStepEdit(stepId) {
+  const step = activeSession.steps.find(s => s.id === stepId);
+  if (!step) return;
+
+  const ta = document.getElementById(`edit-text-${stepId}`);
+  const newText = ta?.value.trim() ?? '';
+
+  // Write back into the right field
+  if (step.type === 'manual' || step.type === 'narration') {
+    step.note = newText;
+  } else if (step.type === 'navigation') {
+    step.pageTitle = newText;
+  } else if (step.type !== 'screenshot') {
+    if (!step.element) step.element = {};
+    step.element.label = newText;
+  }
+
+  // Apply screenshot change if any
+  if (Object.prototype.hasOwnProperty.call(stepEditScreenshot, stepId)) {
+    step.screenshot = stepEditScreenshot[stepId]; // null removes it
+    delete stepEditScreenshot[stepId];
+  }
+
+  // Persist to sessionHistory
+  const data = await chrome.storage.local.get(['sessionHistory']);
+  const history = (data.sessionHistory || []).map(s =>
+    s.id === activeSession.id ? activeSession : s
+  );
+  await chrome.storage.local.set({ sessionHistory: history });
+  allSessions = history;
+
+  editingStepId = null;
+  renderSteps();
+  renderSidebar();
+}
+
+function attachStepEditFileListeners() {
+  document.querySelectorAll('.step-edit-file-input').forEach(input => {
+    input.addEventListener('change', async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const stepId = input.dataset.stepId;
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        stepEditScreenshot[stepId] = dataUrl;
+        updateStepEditImgPreview(stepId, dataUrl);
+      } catch (_) {}
+      input.value = '';
+    });
+  });
+}
+
+function updateStepEditImgPreview(stepId, src) {
+  const section = document.querySelector('.step-edit-img-section');
+  if (!section) return;
+
+  const statusEl = section.querySelector('.step-edit-img-status');
+  const btnsEl   = section.querySelector('.step-edit-img-btns');
+
+  if (src) {
+    // Update or create image
+    let img = section.querySelector('.step-edit-img-preview');
+    if (img) {
+      img.src = src;
+    } else {
+      const ph = section.querySelector('.step-edit-img-placeholder');
+      img = document.createElement('img');
+      img.className = 'step-edit-img-preview';
+      img.alt = 'Screenshot';
+      img.src = src;
+      if (ph) ph.replaceWith(img); else section.prepend(img);
+    }
+    if (statusEl) statusEl.textContent = 'Screenshot selecionada';
+    // Add remove btn if missing
+    if (btnsEl && !btnsEl.querySelector('[data-remove-img]')) {
+      const rm = document.createElement('button');
+      rm.className = 'btn btn-ghost btn-sm';
+      rm.dataset.removeImg = stepId;
+      rm.textContent = 'Remover';
+      btnsEl.appendChild(rm);
+    }
+    const lbl = btnsEl?.querySelector('.step-edit-file-label');
+    if (lbl) lbl.textContent = '↺ Substituir';
+  } else {
+    // Show placeholder
+    let img = section.querySelector('.step-edit-img-preview');
+    if (img) {
+      const ph = document.createElement('div');
+      ph.className = 'step-edit-img-placeholder';
+      ph.textContent = '📷';
+      img.replaceWith(ph);
+    }
+    if (statusEl) statusEl.textContent = 'Sem screenshot';
+    const removeBtn = btnsEl?.querySelector('[data-remove-img]');
+    if (removeBtn) removeBtn.remove();
+    const lbl = btnsEl?.querySelector('.step-edit-file-label');
+    if (lbl) lbl.textContent = '+ Adicionar';
+  }
 }
 
 function buildStepLabel(step) {
@@ -640,6 +846,31 @@ function setupListeners() {
     });
   });
 
+  // Step inline editing — event delegation on steps-list
+  $('steps-list').addEventListener('click', async e => {
+    // Save
+    const saveBtn = e.target.closest('[data-save-edit]');
+    if (saveBtn) { await saveStepEdit(saveBtn.dataset.saveEdit); return; }
+
+    // Cancel
+    const cancelBtn = e.target.closest('[data-cancel-edit]');
+    if (cancelBtn) {
+      delete stepEditScreenshot[cancelBtn.dataset.cancelEdit];
+      editingStepId = null;
+      renderSteps();
+      return;
+    }
+
+    // Remove image
+    const removeBtn = e.target.closest('[data-remove-img]');
+    if (removeBtn) {
+      const stepId = removeBtn.dataset.removeImg;
+      stepEditScreenshot[stepId] = null;
+      updateStepEditImgPreview(stepId, null);
+      return;
+    }
+  });
+
   // Edit
   $('btn-edit-doc').addEventListener('click', enterEditMode);
   $('btn-save-edit').addEventListener('click', saveEdit);
@@ -663,6 +894,7 @@ function setupListeners() {
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (!$('lightbox').classList.contains('hidden')) closeLightbox();
+      else if (editingStepId) { delete stepEditScreenshot[editingStepId]; editingStepId = null; renderSteps(); }
       else if (editMode) exitEditMode(true);
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 's' && editMode) {
