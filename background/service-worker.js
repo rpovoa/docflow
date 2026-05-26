@@ -62,6 +62,19 @@ const BUILTIN_SKILLS = [
 
 const MAX_HISTORY = 15;
 
+// Reload any open extension pages when the extension installs or updates so
+// they always run the latest code (fixes stale-cache bug after reload).
+chrome.runtime.onInstalled.addListener(() => {
+  const extOrigin = chrome.runtime.getURL('').replace(/\/$/, '');
+  chrome.tabs.query({}, tabs => {
+    tabs.forEach(tab => {
+      if (tab.url && tab.url.startsWith(extOrigin)) {
+        chrome.tabs.reload(tab.id, { bypassCache: true });
+      }
+    });
+  });
+});
+
 // ── In-memory session (mirrored to chrome.storage.local) ──────────────────────
 let currentSession = null;
 

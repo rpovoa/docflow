@@ -358,6 +358,11 @@
     <p class="lightbox-caption" id="lightbox-caption"></p>
   </div>
 
-  <script src="dashboard.js"></script>
+  <script>
+    (function () {
+      var v = chrome.runtime.getManifest().version;
+      document.write('<scr' + 'ipt src="dashboard.js?v=' + v + '"><\/scr' + 'ipt>');
+    })();
+  </script>
 </body>
 </html>

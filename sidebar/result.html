@@ -187,7 +187,15 @@
     <p class="lightbox-caption" id="lightbox-caption"></p>
   </div>
 
-  <script src="docx-export.js"></script>
-  <script src="result.js"></script>
+  <script>
+    // Cache-bust scripts using the manifest version so Chrome never serves
+    // stale JS after an extension reload or update.
+    (function () {
+      var v = chrome.runtime.getManifest().version;
+      ['docx-export.js', 'result.js'].forEach(function (src) {
+        document.write('<scr' + 'ipt src="' + src + '?v=' + v + '"><\/scr' + 'ipt>');
+      });
+    })();
+  </script>
 </body>
 </html>
