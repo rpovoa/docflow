@@ -72,7 +72,8 @@
         "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_250925_vs_09102025.xlsx",
         "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.1_120925_vs_19092025.xlsx",
         "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_290825_vs_05092025.xlsx",
-        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_270825_vs_03092025_vs_05092025.xlsx"
+        "docs/reference/SPRAA - Pedido de Aprovação de Backog_v1.0_270825_vs_03092025_vs_05092025.xlsx",
+        "docs/reference/template-manual-utilizador.md"
       ],
       "matches": ["<all_urls>"]
     }

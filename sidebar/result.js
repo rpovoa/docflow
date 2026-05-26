@@ -24,12 +24,16 @@ const screenshotEls = new Map();
   document.title = `${sessionData.title} — DocFlow`;
   document.getElementById('header-title').textContent = sessionData.title;
 
+  if (sessionData.refFiles?.length) {
+    setupRefBadge(sessionData.refFiles);
+  }
+
   const usedStepIds = renderDocument();
   renderSidebar();
   renderScreenshots(usedStepIds);
   setupExports();
   setupLightbox();
-  setupImprove();
+  setupChat();
   setupComplement();
 
   document.getElementById('loading').remove();
@@ -57,7 +61,6 @@ function renderDocument() {
     return `<figure class="inline-screenshot" data-step-id="${escAttr(step.id)}">` +
            `<div class="shot-wrap">` +
            `<img src="${step.screenshot}" alt="Passo ${step.index}" loading="lazy">` +
-           buildAnnotationSVG(step.annotation) +
            `</div>` +
            `<figcaption>${annotationLabel(step)}</figcaption>` +
            `</figure>`;
@@ -155,7 +158,6 @@ function renderScreenshots(usedStepIds = new Set()) {
     img.loading      = 'lazy';
 
     wrap.appendChild(img);
-    wrap.insertAdjacentHTML('beforeend', buildAnnotationSVG(step.annotation));
     fig.appendChild(wrap);
     fig.addEventListener('click', () => openLightbox(step));
 
@@ -166,6 +168,47 @@ function renderScreenshots(usedStepIds = new Set()) {
     grid.appendChild(fig);
 
     screenshotEls.set(step.id, fig);
+  });
+}
+
+// ── Reference badge popover ───────────────────────────────────────────────────
+
+function setupRefBadge(refFiles) {
+  const badge   = document.getElementById('ref-badge');
+  const popover = document.getElementById('ref-popover');
+  const list    = document.getElementById('ref-popover-list');
+  const n       = refFiles.length;
+
+  badge.textContent = `📚 ${n} referência${n > 1 ? 's' : ''}`;
+  badge.classList.remove('hidden');
+
+  list.innerHTML = refFiles.map(f =>
+    `<li class="ref-popover-item">` +
+    `<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" class="ref-file-icon">` +
+    `<path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>` +
+    `</svg>` +
+    `<span>${escHtml(f)}</span>` +
+    `</li>`
+  ).join('');
+
+  badge.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = !popover.classList.contains('hidden');
+    if (open) {
+      popover.classList.add('hidden');
+      return;
+    }
+    // Position below the badge
+    const r = badge.getBoundingClientRect();
+    popover.style.top  = `${r.bottom + 6}px`;
+    popover.style.left = `${r.left}px`;
+    popover.classList.remove('hidden');
+  });
+
+  document.addEventListener('click', e => {
+    if (!popover.contains(e.target) && e.target !== badge) {
+      popover.classList.add('hidden');
+    }
   });
 }
 
@@ -213,7 +256,7 @@ function setupLightbox() {
   lb.addEventListener('click', e => { if (e.target === lb) closeLightbox(); });
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
-    if (!document.getElementById('improve-overlay').classList.contains('hidden')) return;
+    if (!document.getElementById('chat-panel').classList.contains('hidden')) return;
     closeLightbox();
   });
 }
@@ -225,22 +268,13 @@ function openLightbox(step) {
   document.getElementById('lightbox-caption').textContent =
     `Passo ${step.index} — ${stepLabel(step)}`;
 
-  const existingSvg = wrap.querySelector('.annotation-svg');
-  if (existingSvg) existingSvg.remove();
-  const svgHtml = buildAnnotationSVG(step.annotation, 'meet');
-  if (svgHtml) wrap.insertAdjacentHTML('beforeend', svgHtml);
-
   lb.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
 }
 
 function closeLightbox() {
-  const lb   = document.getElementById('lightbox');
-  const wrap = document.getElementById('lightbox-img-wrap');
-  lb.classList.add('hidden');
+  document.getElementById('lightbox').classList.add('hidden');
   document.getElementById('lightbox-img').src = '';
-  const svg = wrap?.querySelector('.annotation-svg');
-  if (svg) svg.remove();
   document.body.style.overflow = '';
 }
 
@@ -249,6 +283,9 @@ function closeLightbox() {
 function setupExports() {
   document.getElementById('btn-copy-md').addEventListener('click', copyMarkdown);
   document.getElementById('btn-download-html').addEventListener('click', downloadHtml);
+  document.getElementById('btn-download-docx').addEventListener('click', () => {
+    exportToDocx(markdownContent, sessionData.title);
+  });
 }
 
 async function copyMarkdown() {
@@ -312,6 +349,11 @@ function buildHtmlExport() {
     figure{margin:0}
     figure img{width:100%;border:1px solid #ddd;border-radius:4px;display:block}
     figcaption{font-size:11px;color:#888;margin-top:4px;text-align:center;font-family:-apple-system,sans-serif}
+    table{width:100%;border-collapse:collapse;margin:1.1em 0 1.4em;font-size:.9em;font-family:-apple-system,sans-serif}
+    th,td{text-align:left;padding:8px 14px;border:1px solid #ddd;vertical-align:top;line-height:1.55}
+    thead th{background:#f5f5f5;font-weight:600;font-size:.82em;text-transform:uppercase;letter-spacing:.05em;color:#333}
+    tbody td{color:#444}
+    tbody tr:nth-child(even) td{background:#fafafa}
     footer{margin-top:3em;padding-top:1em;border-top:1px solid #eee;font-size:12px;color:#aaa;text-align:center;font-family:-apple-system,sans-serif}
   </style>
 </head>
@@ -323,153 +365,295 @@ function buildHtmlExport() {
 </html>`;
 }
 
-// ── Improve text feature ──────────────────────────────────────────────────────
+// ── Chat assistant feature ────────────────────────────────────────────────────
 
-let improveRange        = null;
-let improveOriginalText = '';
+let chatHistory       = [];
+let chatSelectedRange = null;
+let chatSelectedText  = '';
 
-function setupImprove() {
-  const docContent = document.getElementById('document-content');
-  const triggerBtn = document.getElementById('btn-improve-trigger');
-  const overlay    = document.getElementById('improve-overlay');
+function setupChat() {
+  const docContent  = document.getElementById('document-content');
+  const floatBtn    = document.getElementById('btn-chat-select');
+  const panel       = document.getElementById('chat-panel');
+  const toggleBtn   = document.getElementById('btn-chat');
+  const closeBtn    = document.getElementById('chat-close');
+  const clearBtn    = document.getElementById('chat-clear');
+  const sendBtn     = document.getElementById('chat-send');
+  const inputEl     = document.getElementById('chat-input');
+  const ctxRemove   = document.getElementById('chat-ctx-remove');
 
-  // Show floating button when text is selected inside the document
+  // Show floating "send to chat" button on text selection within document
   docContent.addEventListener('mouseup', () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) {
-      triggerBtn.classList.add('hidden');
+      floatBtn.classList.add('hidden');
       return;
     }
     const text = sel.toString().trim();
-    if (text.length < 10) {
-      triggerBtn.classList.add('hidden');
-      return;
-    }
+    if (text.length < 10) { floatBtn.classList.add('hidden'); return; }
+
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    triggerBtn.style.top  = `${rect.bottom + 8}px`;
-    triggerBtn.style.left = `${Math.max(0, Math.min(rect.left, window.innerWidth - 140))}px`;
-    triggerBtn.classList.remove('hidden');
+    floatBtn.style.top  = `${rect.bottom + window.scrollY + 8}px`;
+    floatBtn.style.left = `${Math.max(0, Math.min(rect.left, window.innerWidth - 160))}px`;
+    floatBtn.classList.remove('hidden');
   });
 
-  // Hide button when clicking outside the document (but not when clicking the button itself)
+  // Hide float button on mousedown outside doc/button
   document.addEventListener('mousedown', e => {
-    if (e.target === triggerBtn) return;
-    if (!e.target.closest('#document-content')) triggerBtn.classList.add('hidden');
+    if (e.target === floatBtn) return;
+    if (!e.target.closest('#document-content')) floatBtn.classList.add('hidden');
   });
 
-  // Open improve panel when button is clicked
-  triggerBtn.addEventListener('click', () => {
+  // Float button clicked → save selection, open chat with context
+  floatBtn.addEventListener('click', () => {
     const sel = window.getSelection();
     if (!sel || !sel.rangeCount) return;
-    improveRange        = sel.getRangeAt(0).cloneRange();
-    improveOriginalText = sel.toString().trim();
+    chatSelectedRange = sel.getRangeAt(0).cloneRange();
+    chatSelectedText  = sel.toString().trim();
     sel.removeAllRanges();
-    triggerBtn.classList.add('hidden');
-    openImprovePanel();
+    floatBtn.classList.add('hidden');
+    setContextBar(chatSelectedText);
+    openChat();
+    inputEl.focus();
   });
 
-  // Close handlers
-  document.getElementById('improve-close').addEventListener('click', closeImprovePanel);
-  document.getElementById('improve-btn-cancel').addEventListener('click', closeImprovePanel);
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeImprovePanel(); });
+  toggleBtn.addEventListener('click', toggleChat);
+  closeBtn.addEventListener('click', closeChat);
+
+  clearBtn.addEventListener('click', () => {
+    chatHistory = [];
+    chatSelectedRange = null;
+    chatSelectedText  = '';
+    document.getElementById('chat-messages').innerHTML =
+      `<div class="chat-empty" id="chat-empty">
+        <div class="chat-empty-icon">💬</div>
+        <p>Seleciona texto no documento e clica em <strong>Enviar para chat</strong> para melhorá-lo com instruções.</p>
+        <p style="margin-top:8px;font-size:12px">Ou escreve diretamente uma pergunta ou instrução.</p>
+      </div>`;
+    document.getElementById('chat-ctx-bar').classList.add('hidden');
+  });
+
+  ctxRemove.addEventListener('click', () => {
+    chatSelectedRange = null;
+    chatSelectedText  = '';
+    document.getElementById('chat-ctx-bar').classList.add('hidden');
+  });
+
+  sendBtn.addEventListener('click', sendChatMessage);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
+  // Escape closes chat if open
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && !overlay.classList.contains('hidden')) {
-      closeImprovePanel();
+    if (e.key === 'Escape' && !panel.classList.contains('hidden')) {
+      closeChat();
       e.stopImmediatePropagation();
     }
   });
-
-  document.getElementById('improve-btn-retry').addEventListener('click', () => {
-    callImproveAI(improveOriginalText);
-  });
-
-  document.getElementById('improve-btn-accept').addEventListener('click', acceptImprovement);
 }
 
-function openImprovePanel() {
-  document.getElementById('improve-original').textContent  = improveOriginalText;
-  document.getElementById('improve-result').textContent    = '';
-  document.getElementById('improve-error').textContent     = '';
-  document.getElementById('improve-error').classList.add('hidden');
-  document.getElementById('improve-btn-accept').disabled   = true;
-  document.getElementById('improve-btn-retry').disabled    = true;
-  document.getElementById('improve-overlay').classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-  callImproveAI(improveOriginalText);
+function openChat() {
+  document.getElementById('chat-panel').classList.remove('hidden');
+  document.getElementById('btn-chat').classList.add('btn-chat-active');
 }
 
-function closeImprovePanel() {
-  document.getElementById('improve-overlay').classList.add('hidden');
-  document.body.style.overflow = '';
-  improveRange = null;
+function closeChat() {
+  document.getElementById('chat-panel').classList.add('hidden');
+  document.getElementById('btn-chat').classList.remove('btn-chat-active');
 }
 
-async function callImproveAI(text) {
-  const loadingEl  = document.getElementById('improve-loading');
-  const resultEl   = document.getElementById('improve-result');
-  const errorEl    = document.getElementById('improve-error');
-  const acceptBtn  = document.getElementById('improve-btn-accept');
-  const retryBtn   = document.getElementById('improve-btn-retry');
-
-  loadingEl.classList.remove('hidden');
-  resultEl.textContent = '';
-  errorEl.classList.add('hidden');
-  acceptBtn.disabled = true;
-  retryBtn.disabled  = true;
-
-  try {
-    const result = await chrome.runtime.sendMessage({ type: 'IMPROVE_TEXT', text });
-    loadingEl.classList.add('hidden');
-    if (result.error) throw new Error(result.error);
-    resultEl.textContent = result.improved;
-    acceptBtn.disabled   = false;
-    retryBtn.disabled    = false;
-  } catch (err) {
-    loadingEl.classList.add('hidden');
-    errorEl.textContent = err.message || 'Erro ao melhorar texto. Tenta novamente.';
-    errorEl.classList.remove('hidden');
-    retryBtn.disabled = false;
+function toggleChat() {
+  const panel = document.getElementById('chat-panel');
+  if (panel.classList.contains('hidden')) {
+    openChat();
+    document.getElementById('chat-input').focus();
+  } else {
+    closeChat();
   }
 }
 
-function acceptImprovement() {
-  const improved = document.getElementById('improve-result').textContent.trim();
-  if (!improved || !improveRange) return;
+function setContextBar(text) {
+  const bar     = document.getElementById('chat-ctx-bar');
+  const ctxText = document.getElementById('chat-ctx-text');
+  ctxText.textContent = text.length > 80 ? text.slice(0, 80) + '…' : text;
+  bar.classList.remove('hidden');
+}
 
-  // Replace selected range in the DOM
+async function sendChatMessage() {
+  const inputEl = document.getElementById('chat-input');
+  const instruction = inputEl.value.trim();
+  if (!instruction) return;
+
+  const savedRange = chatSelectedRange;
+  const savedText  = chatSelectedText;
+
+  // Build content for this user turn
+  let userContent = instruction;
+  if (savedText) {
+    userContent =
+      `[TEXTO SELECIONADO]\n${savedText}\n[/TEXTO SELECIONADO]\n\n${instruction}`;
+  }
+
+  // Append user bubble and add to history
+  appendUserMessage(instruction, savedText);
+  chatHistory.push({ role: 'user', content: userContent });
+
+  // Clear input and context
+  inputEl.value = '';
+  chatSelectedRange = null;
+  chatSelectedText  = '';
+  document.getElementById('chat-ctx-bar').classList.add('hidden');
+
+  // Typing indicator
+  const typingId = 'typing-' + Date.now();
+  const messagesEl = document.getElementById('chat-messages');
+  const typingEl = document.createElement('div');
+  typingEl.id = typingId;
+  typingEl.className = 'chat-msg chat-msg-ai';
+  typingEl.innerHTML = '<div class="chat-typing"><span></span><span></span><span></span></div>';
+  messagesEl.appendChild(typingEl);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
   try {
-    improveRange.deleteContents();
+    const result = await chrome.runtime.sendMessage({
+      type: 'CHAT_IMPROVE',
+      history: chatHistory,
+    });
+
+    typingEl.remove();
+
+    if (result?.error) throw new Error(result.error);
+
+    const raw = result?.response || '';
+
+    // Parse [MELHORIA]...[/MELHORIA] block
+    const improvedMatch = raw.match(/\[MELHORIA\]([\s\S]*?)\[\/MELHORIA\]/);
+    const improved     = improvedMatch ? improvedMatch[1].trim() : null;
+    const explanation  = raw.replace(/\[MELHORIA\][\s\S]*?\[\/MELHORIA\]/, '').trim();
+
+    chatHistory.push({ role: 'assistant', content: raw });
+
+    appendAssistantMessage(explanation, improved, savedRange, savedText);
+  } catch (err) {
+    typingEl.remove();
+    const errorEl = document.createElement('div');
+    errorEl.className = 'chat-msg chat-msg-ai';
+    errorEl.innerHTML =
+      `<div class="chat-error">${escHtml(err.message || 'Erro ao contactar o assistente.')}</div>`;
+    messagesEl.appendChild(errorEl);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    // Remove failed turn from history so user can retry cleanly
+    chatHistory.pop();
+  }
+}
+
+function appendUserMessage(instruction, selectedText) {
+  const messagesEl = document.getElementById('chat-messages');
+  document.getElementById('chat-empty')?.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg chat-msg-user';
+
+  let inner = '';
+  if (selectedText) {
+    const preview = selectedText.length > 60 ? selectedText.slice(0, 60) + '…' : selectedText;
+    inner += `<div class="chat-msg-ctx-pill">"${escHtml(preview)}"</div>`;
+  }
+  inner += `<div class="chat-bubble">${escHtml(instruction)}</div>`;
+  msg.innerHTML = inner;
+
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function appendAssistantMessage(explanation, improved, savedRange, savedText) {
+  const messagesEl = document.getElementById('chat-messages');
+
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg chat-msg-ai';
+
+  let inner = '';
+  if (explanation) {
+    inner += `<div class="chat-bubble">${escHtml(explanation)}</div>`;
+  }
+
+  if (improved) {
+    const improvedId = 'imp-' + Date.now();
+    inner +=
+      `<div class="chat-improved" id="${improvedId}">` +
+        `<div class="chat-improved-label">Sugestão de melhoria</div>` +
+        `<div class="chat-improved-text">${escHtml(improved)}</div>` +
+        `<div class="chat-improved-actions">` +
+          `<button class="chat-btn-accept">Aplicar no documento</button>` +
+          `<button class="chat-btn-copy">Copiar</button>` +
+        `</div>` +
+      `</div>`;
+  }
+
+  msg.innerHTML = inner;
+
+  if (improved) {
+    const block = msg.querySelector('.chat-improved');
+    const acceptBtn = block.querySelector('.chat-btn-accept');
+    const copyBtn   = block.querySelector('.chat-btn-copy');
+
+    acceptBtn.addEventListener('click', () => {
+      applyImprovement(improved, savedText, savedRange, acceptBtn);
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(improved);
+      const prev = copyBtn.textContent;
+      copyBtn.textContent = 'Copiado!';
+      setTimeout(() => { copyBtn.textContent = prev; }, 2000);
+    });
+  }
+
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function applyImprovement(improved, originalText, range, acceptBtn) {
+  if (!range) {
+    if (acceptBtn) {
+      acceptBtn.textContent = 'Sem selecção activa';
+      acceptBtn.disabled = true;
+    }
+    return;
+  }
+
+  try {
+    range.deleteContents();
     const node = document.createTextNode(improved);
-    improveRange.insertNode(node);
-    improveRange.setStartAfter(node);
-    improveRange.collapse(true);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
   } catch (e) {
     console.warn('[DocFlow] DOM replacement failed:', e);
   }
 
-  // Best-effort update of the markdown source for exports
-  if (improveOriginalText && markdownContent.includes(improveOriginalText)) {
-    markdownContent = markdownContent.replace(improveOriginalText, improved);
+  if (originalText && markdownContent.includes(originalText)) {
+    markdownContent = markdownContent.replace(originalText, improved);
   }
 
-  closeImprovePanel();
+  if (acceptBtn) {
+    acceptBtn.textContent = 'Aplicado ✓';
+    acceptBtn.disabled = true;
+  }
 }
 
 // ── Markdown → HTML renderer ──────────────────────────────────────────────────
-// Handles: # h1, ## h2, ### h3, 1. ol, - ul, **bold**, *italic*, `code`, paragraphs
+// Handles: # h1, ## h2, ### h3, 1. ol, - ul, **bold**, *italic*, `code`, tables, paragraphs
 
 function markdownToHtml(md) {
   const lines = md.split('\n');
   let   html  = '';
-  let   inOl = false, inUl = false, inP = false;
-
-  function closeLists() {
-    if (inOl) { html += '</ol>\n'; inOl = false; }
-    if (inUl) { html += '</ul>\n'; inUl = false; }
-  }
-  function closeP() {
-    if (inP) { html += '</p>\n'; inP = false; }
-  }
+  let   inOl = false, inUl = false, inP = false, inTable = false;
+  let   tableLines = [];
 
   // Apply inline formatting after HTML-escaping the text
   function inline(raw) {
@@ -479,8 +663,51 @@ function markdownToHtml(md) {
       .replace(/`(.+?)`/g,       '<code>$1</code>');
   }
 
+  function closeLists() {
+    if (inOl) { html += '</ol>\n'; inOl = false; }
+    if (inUl) { html += '</ul>\n'; inUl = false; }
+  }
+  function closeP() {
+    if (inP) { html += '</p>\n'; inP = false; }
+  }
+  function flushTable() {
+    if (!inTable) return;
+    inTable = false;
+    if (tableLines.length < 2) { tableLines = []; return; }
+    const parseCells = line =>
+      line.replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+    const headers = parseCells(tableLines[0]);
+    // tableLines[1] is the separator row (|---|---|) — skip it
+    const rows = tableLines.slice(2).map(parseCells);
+    tableLines = [];
+
+    html += '<table>\n<thead>\n<tr>\n';
+    headers.forEach(h => { html += `<th>${h}</th>\n`; });
+    html += '</tr>\n</thead>\n';
+    if (rows.length) {
+      html += '<tbody>\n';
+      rows.forEach(row => {
+        html += '<tr>\n';
+        row.forEach(cell => { html += `<td>${cell}</td>\n`; });
+        html += '</tr>\n';
+      });
+      html += '</tbody>\n';
+    }
+    html += '</table>\n';
+  }
+
   for (const line of lines) {
     const t = line.trim();
+
+    // Table rows start with |
+    if (t.startsWith('|')) {
+      closeP(); closeLists();
+      inTable = true;
+      tableLines.push(t);
+      continue;
+    } else if (inTable) {
+      flushTable();
+    }
 
     if (!t) { closeP(); closeLists(); continue; }
 
@@ -510,7 +737,7 @@ function markdownToHtml(md) {
     }
   }
 
-  closeP(); closeLists();
+  closeP(); closeLists(); flushTable();
   return html;
 }
 

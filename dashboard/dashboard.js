@@ -13,6 +13,10 @@ let activeView     = 'sessions'; // 'sessions' | 'settings'
 let settingsData   = null;       // cached settings from SW
 let settingsProvider = 'anthropic';
 
+// Skills state
+let skillsList      = [];        // current skills array (builtin + custom)
+let editingSkillId  = null;      // null = adding new, string = editing existing
+
 // Step inline editing state
 let editingStepId      = null;
 let stepEditScreenshot = {}; // stepId → dataURL | null (remove) | undefined (unchanged)
@@ -1056,6 +1060,10 @@ function renderSettings(s) {
     $('s-template-text').value = s.templateText;
     updateTemplateChars();
   }
+
+  // Skills
+  skillsList = s.skills || [];
+  renderSkills();
 }
 
 function populateModelSelect(provider, savedModel) {
@@ -1223,6 +1231,116 @@ function updateTemplateChars() {
   el.className = 'template-chars' + (len > 50000 ? ' over' : len > 30000 ? ' warn' : '');
 }
 
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+function renderSkills() {
+  const list = $('skill-list');
+  if (!list) return;
+
+  if (!skillsList.length) {
+    list.innerHTML = '<p class="skill-empty">Nenhuma skill configurada.</p>';
+    return;
+  }
+
+  list.innerHTML = skillsList.map(skill => {
+    const disabledClass = skill.enabled ? '' : ' skill-disabled';
+    return `
+      <div class="skill-card${disabledClass}" data-skill-id="${escHtml(skill.id)}">
+        <div class="skill-card-header">
+          <label class="toggle" title="${skill.enabled ? 'Desativar' : 'Ativar'} skill">
+            <input type="checkbox" class="skill-toggle-cb" data-skill-id="${escHtml(skill.id)}"
+              ${skill.enabled ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+          <div class="skill-card-info">
+            <span class="skill-name">${escHtml(skill.name)}</span>
+            ${skill.builtin ? '<span class="skill-badge-builtin">pré-definida</span>' : ''}
+          </div>
+          <div class="skill-card-actions">
+            <button class="btn-icon-sm" data-action="edit" data-skill-id="${escHtml(skill.id)}" title="Editar">✏</button>
+            <button class="btn-icon-sm danger" data-action="delete" data-skill-id="${escHtml(skill.id)}" title="Eliminar">×</button>
+          </div>
+        </div>
+        <p class="skill-instruction">${escHtml(skill.instruction)}</p>
+      </div>`;
+  }).join('');
+
+  // Wire toggle checkboxes
+  list.querySelectorAll('.skill-toggle-cb').forEach(cb => {
+    cb.addEventListener('change', () => toggleSkill(cb.dataset.skillId));
+  });
+
+  // Wire edit/delete buttons via delegation
+  list.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const { action, skillId } = btn.dataset;
+      if (action === 'edit')   openSkillForm(skillId);
+      if (action === 'delete') deleteSkill(skillId);
+    });
+  });
+}
+
+function openSkillForm(skillId = null) {
+  editingSkillId = skillId;
+  const skill = skillId ? skillsList.find(s => s.id === skillId) : null;
+  $('sf-name').value        = skill ? skill.name        : '';
+  $('sf-instruction').value = skill ? skill.instruction : '';
+  $('skill-form').classList.remove('hidden');
+  $('sf-name').focus();
+}
+
+function closeSkillForm() {
+  editingSkillId = null;
+  $('skill-form').classList.add('hidden');
+  $('sf-name').value        = '';
+  $('sf-instruction').value = '';
+}
+
+function saveSkillForm() {
+  const name        = $('sf-name').value.trim();
+  const instruction = $('sf-instruction').value.trim();
+  if (!name)        { $('sf-name').focus();        return; }
+  if (!instruction) { $('sf-instruction').focus(); return; }
+
+  if (editingSkillId) {
+    // Update existing
+    skillsList = skillsList.map(s =>
+      s.id === editingSkillId ? { ...s, name, instruction } : s
+    );
+  } else {
+    // Add new custom skill
+    skillsList = [...skillsList, {
+      id:          'custom-' + Date.now(),
+      name,
+      instruction,
+      enabled:     true,
+      builtin:     false,
+    }];
+  }
+
+  closeSkillForm();
+  renderSkills();
+  persistSkills();
+}
+
+function toggleSkill(skillId) {
+  skillsList = skillsList.map(s =>
+    s.id === skillId ? { ...s, enabled: !s.enabled } : s
+  );
+  renderSkills();
+  persistSkills();
+}
+
+function deleteSkill(skillId) {
+  skillsList = skillsList.filter(s => s.id !== skillId);
+  renderSkills();
+  persistSkills();
+}
+
+async function persistSkills() {
+  await chrome.runtime.sendMessage({ type: 'SAVE_SKILLS', skills: skillsList });
+}
+
 function setupSettingsListeners() {
   $('btn-nav-settings').addEventListener('click', selectSettings);
 
@@ -1295,6 +1413,14 @@ function setupSettingsListeners() {
       showKeyMsg('s-extract-msg', '✓ Guia de estilo extraído!', 'success');
     }
     btn.disabled = false; btn.textContent = prev;
+  });
+
+  // Skills
+  $('btn-add-skill').addEventListener('click', () => openSkillForm(null));
+  $('sf-cancel').addEventListener('click', closeSkillForm);
+  $('sf-save').addEventListener('click', saveSkillForm);
+  $('sf-instruction').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveSkillForm();
   });
 
   // Save preferences (non-key settings)

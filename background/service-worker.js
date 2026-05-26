@@ -18,13 +18,47 @@ const MSG = {
   DELETE_SESSION:    'DELETE_SESSION',
   GET_SETTINGS:      'GET_SETTINGS',
   SAVE_SETTINGS:     'SAVE_SETTINGS',
+  SAVE_SKILLS:       'SAVE_SKILLS',
   LOCK_SESSION:      'LOCK_SESSION',
   REMOVE_KEY:        'REMOVE_KEY',
   ADD_NARRATION:     'ADD_NARRATION',
   IMPROVE_TEXT:      'IMPROVE_TEXT',
+  CHAT_IMPROVE:      'CHAT_IMPROVE',
   DELETE_STEP:       'DELETE_STEP',
   STOP_AND_GENERATE: 'STOP_AND_GENERATE',
 };
+
+// ── Built-in skills ───────────────────────────────────────────────────────────
+const BUILTIN_SKILLS = [
+  {
+    id: 'builtin-field-types',
+    name: 'Detectar tipo de dados',
+    instruction: 'Para cada campo de input, identifica e documenta o tipo de dados esperado (ex: texto livre, número, data DD/MM/AAAA, endereço de email, número de telefone, NIF/NIPC, código postal, IBAN, moeda). Inclui esta informação entre parênteses na coluna de descrição da tabela de campos.',
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'builtin-required-fields',
+    name: 'Campos obrigatórios',
+    instruction: 'Analisa o contexto de cada campo e determina se é obrigatório. Quando for possível inferir (ex: campo preenchido sempre, validação visível, asterisco no label), indica "(obrigatório)" no final da descrição do campo na tabela.',
+    enabled: false,
+    builtin: true,
+  },
+  {
+    id: 'builtin-prerequisites',
+    name: 'Secção de pré-requisitos',
+    instruction: 'Adiciona uma secção "## Pré-requisitos" imediatamente antes da primeira secção de conteúdo, listando os requisitos ou condições necessárias para realizar esta tarefa (ex: permissões de utilizador necessárias, dados que devem existir previamente no sistema, passos que devem ter sido concluídos antes).',
+    enabled: false,
+    builtin: true,
+  },
+  {
+    id: 'builtin-validation',
+    name: 'Regras de validação',
+    instruction: 'Quando for possível inferir restrições de preenchimento a partir dos dados da sessão (ex: formato obrigatório, número mínimo/máximo de caracteres, lista de valores permitidos, campos dependentes de outros), documenta essas regras na descrição do campo na tabela.',
+    enabled: false,
+    builtin: true,
+  },
+];
 
 const MAX_HISTORY = 15;
 
@@ -73,13 +107,20 @@ async function broadcastToTabs(message) {
 }
 
 async function captureScreenshot(tabId) {
+  if (!tabId) return null;
   try {
     const tab = await chrome.tabs.get(tabId);
-    return await chrome.tabs.captureVisibleTab(tab.windowId, {
+    // Hide the recording sidebar so it doesn't appear in the capture
+    await chrome.tabs.sendMessage(tabId, { type: 'SIDEBAR_VISIBILITY', visible: false }).catch(() => {});
+    await new Promise(r => setTimeout(r, 120));
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
       format: 'jpeg',
       quality: 80,
     });
+    chrome.tabs.sendMessage(tabId, { type: 'SIDEBAR_VISIBILITY', visible: true }).catch(() => {});
+    return dataUrl;
   } catch (err) {
+    chrome.tabs.sendMessage(tabId, { type: 'SIDEBAR_VISIBILITY', visible: true }).catch(() => {});
     console.warn('[DocFlow] Screenshot failed:', err.message);
     return null;
   }
@@ -182,13 +223,21 @@ async function togglePause() {
 async function addStep(stepData, tabId) {
   if (!currentSession || currentSession.stoppedAt) return null;
 
-  // Server-side deduplication: drop consecutive identical click/input on same element
+  // Server-side deduplication: drop truly identical consecutive events within a short window.
+  // Clicks: same element + same page within 3 s (client-side 600 ms already covers accidents).
+  // Input/select: same element + same VALUE within 3 s (different value = real edit, keep it).
   if (['click', 'input', 'select'].includes(stepData.type)) {
     const last = currentSession.steps[currentSession.steps.length - 1];
+    const DEDUP_MS = 3000;
+    const valueMatch = ['input', 'select'].includes(stepData.type)
+      ? last?.value === stepData.value
+      : true;
     if (last &&
         last.type  === stepData.type &&
         last.url   === stepData.url &&
-        last.element?.label === stepData.element?.label) {
+        last.element?.label === stepData.element?.label &&
+        valueMatch &&
+        (Date.now() - new Date(last.timestamp).getTime()) < DEDUP_MS) {
       return last;
     }
   }
@@ -445,7 +494,7 @@ ${template}
 ${sessionText}`;
 }
 
-async function callAnthropicAPI(apiKey, model, userMessage) {
+async function callAnthropicAPI(apiKey, model, userMessage, systemPrompt = SYSTEM_PROMPT) {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -457,8 +506,8 @@ async function callAnthropicAPI(apiKey, model, userMessage) {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 4096,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+      max_tokens: 8192,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userMessage }],
     }),
   });
@@ -472,7 +521,7 @@ async function callAnthropicAPI(apiKey, model, userMessage) {
   return data.content[0].text;
 }
 
-async function callOpenAIAPI(apiKey, model, userMessage) {
+async function callOpenAIAPI(apiKey, model, userMessage, systemPrompt = SYSTEM_PROMPT) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -481,9 +530,9 @@ async function callOpenAIAPI(apiKey, model, userMessage) {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 4096,
+      max_tokens: 8192,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user',   content: userMessage },
       ],
     }),
@@ -671,46 +720,113 @@ async function extractXlsxText(arrayBuffer) {
   } catch (_) { return null; }
 }
 
-async function loadReferenceKnowledge() {
+// Extract meaningful keywords from a set of sessions to filter reference documents
+function extractSessionKeywords(sessions) {
+  const terms  = new Set();
+  const stop   = new Set([
+    'para', 'como', 'numa', 'este', 'esta', 'esse', 'essa', 'que', 'com', 'por',
+    'uma', 'num', 'não', 'mais', 'sobre', 'após', 'antes', 'novo', 'nova', 'clique',
+    'campo', 'ecrã', 'botão', 'lista', 'valor', 'dados', 'geral',
+  ]);
+
+  const addText = text => {
+    if (!text) return;
+    const clean = text.toLowerCase().replace(/[^\wáéíóúâêîôûãõàèìòùç\s]/g, ' ');
+    // Add the whole phrase (useful for multi-word labels like "conta bancária")
+    const phrase = clean.trim();
+    if (phrase.length > 3) terms.add(phrase);
+    // Also add individual words
+    clean.split(/\s+/).filter(w => w.length > 3 && !stop.has(w)).forEach(w => terms.add(w));
+  };
+
+  for (const session of sessions) {
+    addText(session.title);
+    for (const step of session.steps) {
+      addText(step.pageTitle);
+      addText(step.element?.label);
+      if (step.type === 'narration') addText(step.note);
+    }
+  }
+  return [...terms].filter(Boolean);
+}
+
+// Filter a document to only include paragraphs that mention session keywords.
+// Always keeps the first block (document header/title). Remaining blocks are
+// scored by keyword hits and included in relevance order up to maxChars.
+function filterDocumentByKeywords(text, keywords, maxChars) {
+  if (!keywords.length) {
+    return text.length > maxChars ? text.slice(0, maxChars) + '…' : text;
+  }
+
+  const blocks = text.split(/\n{2,}/);
+  const lkw    = keywords.map(k => k.toLowerCase());
+
+  const scored = blocks.map((block, i) => {
+    const lb    = block.toLowerCase();
+    const score = lkw.reduce((s, k) => s + (lb.includes(k) ? 1 : 0), 0);
+    return { block, score, isFirst: i === 0 };
+  });
+
+  // First block always in; rest ordered by score desc, zeros excluded
+  const relevant = [
+    scored[0],
+    ...scored.slice(1).filter(b => b.score > 0).sort((a, b) => b.score - a.score),
+  ];
+
+  let result = '';
+  for (const { block } of relevant) {
+    if (result.length + block.length + 2 > maxChars) break;
+    result += (result ? '\n\n' : '') + block;
+  }
+  return result || text.slice(0, maxChars);
+}
+
+// Load reference files, filtering content by session keywords.
+// Returns { text, fileNames } or null if no files found.
+async function loadReferenceKnowledge(keywords = []) {
   try {
-    // Discover reference files from web_accessible_resources in manifest.json
-    // (no index file needed — just add the path to manifest.json + reload)
     const war = chrome.runtime.getManifest().web_accessible_resources || [];
     const refPaths = war
       .flatMap(entry => Array.isArray(entry.resources) ? entry.resources : [])
       .filter(r =>
         r.startsWith('docs/reference/') &&
         !r.endsWith('style-guide.md') &&
+        !r.endsWith('template.docx') &&
         !r.includes('*')
       );
 
     if (!refPaths.length) return null;
 
-    const MAX = 30_000;
-    const parts = [];
-    let total = 0;
+    const MAX_PER_FILE = 20_000;
+    const MAX_TOTAL    = 60_000;
+    const parts     = [];
+    const fileNames = [];
+    let   total     = 0;
 
     for (const path of refPaths) {
-      if (total >= MAX) break;
+      if (total >= MAX_TOTAL) break;
       try {
-        const res = await fetch(chrome.runtime.getURL(path));
+        const res  = await fetch(chrome.runtime.getURL(path));
         if (!res.ok) continue;
         const name = path.split('/').pop();
         const ext  = name.split('.').pop().toLowerCase();
-        let text = null;
+        let text   = null;
         if      (ext === 'docx')                      text = await extractDocxText(await res.arrayBuffer());
         else if (ext === 'xlsx')                      text = await extractXlsxText(await res.arrayBuffer());
         else if (['txt', 'md', 'csv'].includes(ext))  text = await res.text();
         if (!text?.trim()) continue;
-        const chunk = `### ${name}\n${text.trim()}`;
-        const remaining = MAX - total;
-        parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '...' : chunk);
+
+        const filtered  = filterDocumentByKeywords(text.trim(), keywords, MAX_PER_FILE);
+        const chunk     = `### ${name}\n${filtered}`;
+        const remaining = MAX_TOTAL - total;
+        parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '…' : chunk);
         total += Math.min(chunk.length, remaining);
+        fileNames.push(name);
       } catch (e) {
         console.warn(`[DocFlow] Erro ao carregar referência "${path}":`, e.message);
       }
     }
-    return parts.length ? parts.join('\n\n') : null;
+    return parts.length ? { text: parts.join('\n\n'), fileNames } : null;
   } catch (_) { return null; }
 }
 
@@ -866,15 +982,27 @@ async function generateDocument(sessionIds) {
     userMessage = buildPrompt(sessions[0], template);
   }
 
-  // Prepend reference knowledge if available
-  const referenceKnowledge = await loadReferenceKnowledge();
-  if (referenceKnowledge) {
+  // Prepend reference knowledge filtered by session keywords
+  const keywords   = extractSessionKeywords(sessions);
+  const refResult  = await loadReferenceKnowledge(keywords);
+  if (refResult) {
     userMessage =
       'CONHECIMENTO DE REFERÊNCIA DA ORGANIZAÇÃO ' +
       '(terminologia, definições de campos, regras de negócio — ' +
       'usa este conteúdo para enriquecer a documentação com detalhes precisos do sistema):\n' +
-      '---\n' + referenceKnowledge + '\n---\n\n' +
+      '---\n' + refResult.text + '\n---\n\n' +
       userMessage;
+    pendingSession = { ...pendingSession, refFiles: refResult.fileNames };
+  }
+
+  // Build effective system prompt — append active skills
+  const activeSkills = (_cfg.skills || []).filter(s => s.enabled);
+  let effectiveSystemPrompt = SYSTEM_PROMPT;
+  if (activeSkills.length) {
+    const skillsBlock = activeSkills
+      .map(s => `[${s.name}]\n${s.instruction.trim()}`)
+      .join('\n\n');
+    effectiveSystemPrompt += `\n\n━━━ INSTRUÇÕES PERSONALIZADAS ━━━\n\n${skillsBlock}`;
   }
 
   try {
@@ -884,12 +1012,12 @@ async function generateDocument(sessionIds) {
       const apiKey = await getApiKey('openai', data);
       const model  = _cfg.openaiModel || data.openaiModel || 'gpt-4o';
       if (!apiKey) return { error: 'Chave API OpenAI não configurada. Abre o Dashboard → Configurações.' };
-      markdown = await callOpenAIAPI(apiKey, model, userMessage);
+      markdown = await callOpenAIAPI(apiKey, model, userMessage, effectiveSystemPrompt);
     } else {
       const apiKey = await getApiKey('anthropic', data);
       const model  = _cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5';
       if (!apiKey) return { error: 'Chave API Anthropic não configurada. Abre o Dashboard → Configurações.' };
-      markdown = await callAnthropicAPI(apiKey, model, userMessage);
+      markdown = await callAnthropicAPI(apiKey, model, userMessage, effectiveSystemPrompt);
     }
 
     const sessionIds = sessions.map(s => s.id);
@@ -987,6 +1115,67 @@ async function improveText(text) {
       model, max_tokens: 1024,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
+    }),
+  });
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `Erro Anthropic: ${res.status}`); }
+  const d = await res.json();
+  return d.content[0].text.trim();
+}
+
+async function chatImprove(history) {
+  const data = await chrome.storage.local.get([
+    'settings', 'provider', 'anthropicKey', 'anthropicModel', 'openaiKey', 'openaiModel', 'apiKey',
+  ]);
+  const cfg      = data.settings || {};
+  const provider = cfg.provider || data.provider || 'anthropic';
+  const apiKey   = await getApiKey(provider, data);
+  if (!apiKey) throw new Error('Chave de API não configurada. Vai às definições e adiciona a tua chave.');
+
+  const model = provider === 'openai'
+    ? (cfg.openaiModel    || data.openaiModel    || 'gpt-4o')
+    : (cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5');
+
+  const systemPrompt =
+    'És um assistente especializado em edição de documentação técnica em Português Europeu (PT-PT).\n' +
+    'O utilizador está a rever um manual gerado automaticamente.\n\n' +
+    'QUANDO HÁ TEXTO SELECIONADO:\n' +
+    'O utilizador marca-o entre [TEXTO SELECIONADO] e [/TEXTO SELECIONADO].\n' +
+    'Neste caso DEVES incluir sempre a versão melhorada entre:\n' +
+    '[MELHORIA]\ntexto melhorado aqui\n[/MELHORIA]\n' +
+    'Podes adicionar uma breve explicação (1-2 frases) antes desse bloco.\n\n' +
+    'QUANDO NÃO HÁ TEXTO SELECIONADO:\n' +
+    'Responde de forma conversacional. Se sugerires texto, coloca-o entre [MELHORIA] e [/MELHORIA].\n\n' +
+    'REGRAS PERMANENTES:\n' +
+    '- Português Europeu (PT-PT) sempre\n' +
+    '- Tom formal e técnico, adequado a manuais de utilizador\n' +
+    '- Preserva o significado e informação do original, salvo instrução explícita em contrário';
+
+  if (provider === 'openai') {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model, max_tokens: 2048,
+        messages: [{ role: 'system', content: systemPrompt }, ...history],
+      }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `Erro OpenAI: ${res.status}`); }
+    const d = await res.json();
+    return d.choices[0].message.content.trim();
+  }
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model, max_tokens: 2048,
+      system: systemPrompt,
+      messages: history,
     }),
   });
   if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `Erro Anthropic: ${res.status}`); }
@@ -1131,6 +1320,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           captureScreenshots: cfg.captureScreenshots !== undefined ? cfg.captureScreenshots : local.captureScreenshots !== false,
           templateEnabled:    cfg.templateEnabled !== undefined ? cfg.templateEnabled : !!local.templateEnabled,
           templateText:       cfg.templateText || local.templateText || '',
+          skills:             cfg.skills || BUILTIN_SKILLS,
 
           anthropicConfigured: !!(cfg.anthropicKeyEncrypted || anthLegacy),
           anthropicEncrypted:  !!cfg.anthropicKeyEncrypted,
@@ -1149,6 +1339,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         const cur = await chrome.storage.local.get(['settings']);
         const upd = { ...(cur.settings || {}), ...message.settings };
+        await chrome.storage.local.set({ settings: upd });
+        sendResponse({ ok: true });
+      })();
+      return true;
+
+    case MSG.SAVE_SKILLS:
+      (async () => {
+        const cur = await chrome.storage.local.get(['settings']);
+        const upd = { ...(cur.settings || {}), skills: message.skills };
         await chrome.storage.local.set({ settings: upd });
         sendResponse({ ok: true });
       })();
@@ -1182,6 +1381,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       improveText(message.text)
         .then(improved => sendResponse({ improved }))
         .catch(err    => sendResponse({ error: err.message }));
+      return true;
+
+    case MSG.CHAT_IMPROVE:
+      chatImprove(message.history)
+        .then(response => sendResponse({ response }))
+        .catch(err     => sendResponse({ error: err.message }));
       return true;
   }
 });

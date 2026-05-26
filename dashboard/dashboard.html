@@ -316,6 +316,31 @@
           </div>
         </section>
 
+        <!-- Skills de Geração -->
+        <section class="settings-section" id="skills-section">
+          <div class="settings-section-header">
+            <h3 class="settings-section-title">Skills de Geração</h3>
+            <button class="btn btn-outline btn-sm" id="btn-add-skill">+ Nova skill</button>
+          </div>
+          <p class="settings-desc">Regras e instruções adicionais que a IA aplica ao gerar o manual. Ativa apenas as que fazem sentido para o teu contexto.</p>
+
+          <div class="skill-list" id="skill-list">
+            <!-- populated by JS -->
+          </div>
+
+          <!-- Inline add/edit form -->
+          <div class="skill-form hidden" id="skill-form">
+            <input type="text" class="settings-input" id="sf-name"
+              placeholder="Nome da skill (ex: Detectar tipo de dados)">
+            <textarea class="settings-textarea" id="sf-instruction" rows="4"
+              placeholder="Instrução para a IA (ex: Para cada input, identifica o tipo de dados esperado: email, NIF, IBAN, data, etc.)"></textarea>
+            <div class="skill-form-actions">
+              <button class="btn btn-ghost btn-sm" id="sf-cancel">Cancelar</button>
+              <button class="btn btn-primary btn-sm" id="sf-save">Guardar skill</button>
+            </div>
+          </div>
+        </section>
+
         <div class="settings-save-bar">
           <button class="btn btn-primary" id="s-save-prefs">Guardar preferências</button>
           <p class="key-msg hidden" id="s-prefs-msg"></p>

@@ -17,7 +17,7 @@
   // Deduplication: track last click to drop accidental double-clicks
   let lastClickKey  = null;
   let lastClickTime = 0;
-  const CLICK_DEDUP_MS = 1500;
+  const CLICK_DEDUP_MS = 600;
 
   // Local step log for the mini-feed (no IDs needed)
   let recentSteps = [];
@@ -66,7 +66,7 @@
   // ── Messaging ─────────────────────────────────────────────────────────────
 
   function trackEvent(stepData) {
-    chrome.runtime.sendMessage({
+    safeSend({
       type: 'TRACK_EVENT',
       step: { ...stepData, url: window.location.href, pageTitle: document.title },
     }).then(resp => {
@@ -77,7 +77,7 @@
       });
       if (recentSteps.length > 10) recentSteps.shift();
       updateMiniFeed();
-    }).catch(() => {});
+    });
   }
 
   // ── Visual feedback ───────────────────────────────────────────────────────
@@ -554,6 +554,16 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // Wraps chrome.runtime.sendMessage to handle both synchronous throws
+  // (e.g. "Extension context invalidated" after a reload) and rejected promises.
+  function safeSend(msg) {
+    try {
+      return chrome.runtime.sendMessage(msg).catch(() => null);
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+  }
+
   function buildSidebarHTML(session) {
     const title = session?.title || 'Sessão';
     return `
@@ -643,7 +653,7 @@
     const list = dfEl('df-steps-full');
     if (!list) return;
     list.innerHTML = '<div class="step-item-label" style="padding:3px 2px;font-size:10px;color:#4b5563">A carregar...</div>';
-    const resp  = await chrome.runtime.sendMessage({ type: 'GET_SESSION' }).catch(() => null);
+    const resp  = await safeSend({ type: 'GET_SESSION' });
     const steps = resp?.session?.steps || [];
     list.innerHTML = '';
     if (!steps.length) {
@@ -701,7 +711,7 @@
         if (e.results[i].isFinal) {
           const text = t.trim();
           if (text) {
-            chrome.runtime.sendMessage({
+            safeSend({
               type:      'ADD_NARRATION',
               text,
               url:       window.location.href,
@@ -709,7 +719,7 @@
             }).then(resp => {
               if (resp?.stepCount != null) updateStepCount(resp.stepCount);
               updateNarrationText('');
-            }).catch(() => {});
+            });
           }
         } else {
           interim += t;
@@ -845,18 +855,15 @@
     dfEl('df-pause').addEventListener('click', async () => {
       const btn = dfEl('df-pause');
       btn.disabled = true;
-      await chrome.runtime.sendMessage({ type: 'TOGGLE_PAUSE' }).catch(() => {});
+      await safeSend({ type: 'TOGGLE_PAUSE' });
       btn.disabled = false;
     });
 
-    // Screenshot — hide sidebar briefly so it doesn't appear in the capture
+    // Screenshot — sidebar is hidden by captureScreenshot in the service worker
     dfEl('df-screenshot').addEventListener('click', async () => {
       const btn = dfEl('df-screenshot');
       btn.disabled = true;
-      sidebarHost.style.display = 'none';
-      await new Promise(r => setTimeout(r, 120));
-      const resp = await chrome.runtime.sendMessage({ type: 'TAKE_SCREENSHOT' }).catch(() => null);
-      sidebarHost.style.display = '';
+      const resp = await safeSend({ type: 'TAKE_SCREENSHOT' });
       if (resp?.stepCount != null) updateStepCount(resp.stepCount);
       btn.disabled = false;
     });
@@ -878,12 +885,12 @@
       if (!note) return;
       const btn = dfEl('df-note-ok');
       btn.disabled = true;
-      const resp = await chrome.runtime.sendMessage({
+      const resp = await safeSend({
         type: 'ADD_NOTE',
         note,
         url:       window.location.href,
         pageTitle: document.title,
-      }).catch(() => null);
+      });
       if (resp?.stepCount != null) updateStepCount(resp.stepCount);
       input.value = '';
       dfEl('df-note-area').classList.add('hidden');
@@ -899,7 +906,7 @@
     dfEl('df-undo').addEventListener('click', async () => {
       const btn = dfEl('df-undo');
       btn.disabled = true;
-      const resp = await chrome.runtime.sendMessage({ type: 'UNDO_LAST_STEP' }).catch(() => null);
+      const resp = await safeSend({ type: 'UNDO_LAST_STEP' });
       if (resp?.session?.steps != null) updateStepCount(resp.session.steps.length);
       btn.disabled = false;
     });
@@ -918,8 +925,7 @@
       btn.textContent = '⏳ A gerar...';
       if (errEl) errEl.classList.add('hidden');
 
-      const result = await chrome.runtime.sendMessage({ type: 'STOP_AND_GENERATE' })
-        .catch(() => ({ error: 'Erro de comunicação' }));
+      const result = await safeSend({ type: 'STOP_AND_GENERATE' }) ?? { error: 'Erro de comunicação' };
 
       // Sidebar may have been removed already — use alert for errors
       if (result?.error) {
@@ -954,7 +960,7 @@
       const stepId = btn.dataset.stepId;
       if (!stepId) return;
       btn.disabled = true;
-      const resp = await chrome.runtime.sendMessage({ type: 'DELETE_STEP', stepId }).catch(() => null);
+      const resp = await safeSend({ type: 'DELETE_STEP', stepId });
       if (resp?.session != null) {
         updateStepCount(resp.session.steps.length);
         const item = dfEl('df-steps-full')?.querySelector(`[data-step-id="${stepId}"]`);
@@ -986,7 +992,7 @@
 
     dfEl('df-stop-do').addEventListener('click', async () => {
       dfEl('df-stop-do').disabled = true;
-      await chrome.runtime.sendMessage({ type: 'STOP_SESSION' }).catch(() => {});
+      await safeSend({ type: 'STOP_SESSION' });
     });
   }
 
@@ -1080,6 +1086,10 @@
   });
 
   chrome.runtime.onMessage.addListener(message => {
+    if (message.type === 'SIDEBAR_VISIBILITY') {
+      if (sidebarHost) sidebarHost.style.visibility = message.visible ? '' : 'hidden';
+      return;
+    }
     if (message.type !== 'SESSION_UPDATED') return;
     const session = message.session;
     if (session && !session.stoppedAt) {
