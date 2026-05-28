@@ -797,7 +797,10 @@ function filterDocumentByKeywords(text, keywords, maxChars) {
   return result || text.slice(0, maxChars);
 }
 
-// Load reference files, filtering content by session keywords.
+// Load reference files for document generation.
+// Template files (.md, .txt) are always included completely — they define writing style
+// and document structure that applies to every generation.
+// Domain files (.xlsx, .docx) are keyword-filtered for relevance and capped at 2 MB.
 // Returns { text, fileNames } or null if no files found.
 async function loadReferenceKnowledge(keywords = []) {
   try {
@@ -807,41 +810,70 @@ async function loadReferenceKnowledge(keywords = []) {
       .filter(r =>
         r.startsWith('docs/reference/') &&
         !r.endsWith('style-guide.md') &&
-        !r.endsWith('template.docx') &&
         !r.includes('*')
       );
 
     if (!refPaths.length) return null;
 
-    const MAX_PER_FILE = 20_000;
-    const MAX_TOTAL    = 60_000;
+    const isTemplate   = p => /\.(md|txt)$/i.test(p);
+    const MAX_FILE_MB  = 2_000_000; // skip binary files > 2 MB (e.g. large DOCX)
+    const MAX_TMPL     = 42_000;    // chars budget for template files (always-on)
+    const MAX_DOMAIN   = 40_000;    // chars budget for domain files (keyword-filtered)
+    const MAX_PER_FILE = 20_000;    // per-file cap inside domain budget
+
     const parts     = [];
     const fileNames = [];
-    let   total     = 0;
+    let   tmplTotal = 0;
+    let   domTotal  = 0;
 
-    for (const path of refPaths) {
-      if (total >= MAX_TOTAL) break;
+    // ── Template files: always include completely, no keyword filtering ─────────
+    for (const path of refPaths.filter(isTemplate)) {
+      if (tmplTotal >= MAX_TMPL) break;
       try {
         const res  = await fetch(chrome.runtime.getURL(path));
         if (!res.ok) continue;
+        const text = (await res.text()).trim();
+        if (!text) continue;
+
+        const name  = path.split('/').pop();
+        const avail = MAX_TMPL - tmplTotal;
+        const chunk = `### ${name}\n${text}`;
+        parts.push(chunk.length > avail ? chunk.slice(0, avail) + '…' : chunk);
+        tmplTotal += Math.min(chunk.length, avail);
+        fileNames.push(name);
+      } catch (e) {
+        console.warn(`[DocFlow] Erro ao carregar template "${path}":`, e.message);
+      }
+    }
+
+    // ── Domain files: keyword-filtered, large files skipped ───────────────────
+    for (const path of refPaths.filter(p => !isTemplate(p))) {
+      if (domTotal >= MAX_DOMAIN) break;
+      try {
+        const res = await fetch(chrome.runtime.getURL(path));
+        if (!res.ok) continue;
         const name = path.split('/').pop();
         const ext  = name.split('.').pop().toLowerCase();
-        let text   = null;
-        if      (ext === 'docx')                      text = await extractDocxText(await res.arrayBuffer());
-        else if (ext === 'xlsx')                      text = await extractXlsxText(await res.arrayBuffer());
-        else if (['txt', 'md', 'csv'].includes(ext))  text = await res.text();
+        const buf  = await res.arrayBuffer();
+
+        if (buf.byteLength > MAX_FILE_MB) continue; // skip files too large to parse reliably
+
+        let text = null;
+        if      (ext === 'docx')  text = await extractDocxText(buf);
+        else if (ext === 'xlsx')  text = await extractXlsxText(buf);
         if (!text?.trim()) continue;
 
         const filtered  = filterDocumentByKeywords(text.trim(), keywords, MAX_PER_FILE);
         const chunk     = `### ${name}\n${filtered}`;
-        const remaining = MAX_TOTAL - total;
+        const remaining = MAX_DOMAIN - domTotal;
         parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '…' : chunk);
-        total += Math.min(chunk.length, remaining);
+        domTotal += Math.min(chunk.length, remaining);
         fileNames.push(name);
       } catch (e) {
         console.warn(`[DocFlow] Erro ao carregar referência "${path}":`, e.message);
       }
     }
+
     return parts.length ? { text: parts.join('\n\n'), fileNames } : null;
   } catch (_) { return null; }
 }
@@ -998,14 +1030,14 @@ async function generateDocument(sessionIds) {
     userMessage = buildPrompt(sessions[0], template);
   }
 
-  // Prepend reference knowledge filtered by session keywords
+  // Prepend reference knowledge: template guide (always) + domain docs (keyword-filtered)
   const keywords   = extractSessionKeywords(sessions);
   const refResult  = await loadReferenceKnowledge(keywords);
   if (refResult) {
     userMessage =
-      'CONHECIMENTO DE REFERÊNCIA DA ORGANIZAÇÃO ' +
-      '(terminologia, definições de campos, regras de negócio — ' +
-      'usa este conteúdo para enriquecer a documentação com detalhes precisos do sistema):\n' +
+      'DOCUMENTOS DE REFERÊNCIA DA ORGANIZAÇÃO:\n' +
+      '• O template de manual define obrigatoriamente a estrutura, tom e convenções de escrita a seguir.\n' +
+      '• Os ficheiros de domínio contêm terminologia, campos, fluxos e regras de negócio do sistema — usa-os para enriquecer o documento com detalhes precisos e linguagem específica da organização.\n' +
       '---\n' + refResult.text + '\n---\n\n' +
       userMessage;
     pendingSession = { ...pendingSession, refFiles: refResult.fileNames };
