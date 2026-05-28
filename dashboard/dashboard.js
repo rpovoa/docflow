@@ -37,6 +37,9 @@ let _regenCloseClick = null;
 // Flag to avoid double-binding global doc features
 let _docFeaturesSetUp = false;
 
+// Document-centric view mode (clicking a doc in the sidebar, or viewing a combined result)
+let activeDocMode = false;
+
 const $ = id => document.getElementById(id);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -113,14 +116,15 @@ function renderSidebar() {
 
   if (!allSessions.length) {
     $('sidebar-empty').classList.remove('hidden');
-    return;
+  } else {
+    $('sidebar-empty').classList.add('hidden');
+    allSessions.forEach(session => {
+      const card = buildCard(session);
+      list.appendChild(card);
+    });
   }
-  $('sidebar-empty').classList.add('hidden');
 
-  allSessions.forEach(session => {
-    const card = buildCard(session);
-    list.appendChild(card);
-  });
+  renderDocList();
 }
 
 function buildCard(session) {
@@ -186,7 +190,8 @@ function updateCombineBar() {
 // ── Session detail ─────────────────────────────────────────────────────────────
 
 function selectSession(session, autoDoc = true) {
-  activeView = 'sessions';
+  activeDocMode = false;
+  activeView    = 'sessions';
   $('settings-panel').classList.add('hidden');
   $('btn-nav-settings').classList.remove('active');
 
@@ -208,6 +213,22 @@ function findDocForSession(sessionId) {
   return allDocuments.find(d => d.sessionIds.length === 1 && d.sessionIds[0] === sessionId)
       || allDocuments.find(d => d.sessionIds.includes(sessionId))
       || null;
+}
+
+function getActiveSteps() {
+  if (activeDocMode && activeDoc) {
+    const steps = [];
+    for (const sid of activeDoc.sessionIds) {
+      const sess = allSessions.find(s => s.id === sid);
+      if (sess?.steps) steps.push(...sess.steps);
+    }
+    return steps;
+  }
+  return activeSession?.steps || [];
+}
+
+function getActiveTitle() {
+  return activeDoc?.title || activeSession?.title || 'DocFlow';
 }
 
 function renderDetail() {
@@ -614,7 +635,7 @@ function renderDocumentView() {
 
 function renderDocumentContent() {
   const byIndex = new Map(
-    (activeSession.steps || [])
+    getActiveSteps()
       .filter(s => s.screenshot)
       .map(s => [s.index, s])
   );
@@ -641,7 +662,7 @@ function renderDocumentContent() {
 }
 
 function renderScreenshots(usedStepIds = new Set()) {
-  const stepsWithShot = (activeSession.steps || []).filter(
+  const stepsWithShot = getActiveSteps().filter(
     s => s.screenshot && !usedStepIds.has(s.id)
   );
   const section = $('screenshots-section');
@@ -693,7 +714,7 @@ function setupLightboxOnDocument() {
   el.addEventListener('click', e => {
     const fig = e.target.closest('.inline-screenshot');
     if (!fig) return;
-    const step = (activeSession.steps || []).find(s => s.id === fig.dataset.stepId);
+    const step = getActiveSteps().find(s => s.id === fig.dataset.stepId);
     if (step) openLightbox(step.screenshot, annotationLabel(step), step.annotation);
   });
 }
@@ -760,15 +781,140 @@ async function deleteSession(id) {
   allSessions  = sessions;
   allDocuments = documents;
 
-  if (activeSession?.id === id) {
+  const wasViewingDeleted = activeSession?.id === id ||
+    (activeDocMode && activeDoc?.sessionIds.includes(id));
+  if (wasViewingDeleted) {
     activeSession = null;
     activeDoc     = null;
+    activeDocMode = false;
     $('session-detail').classList.add('hidden');
     $('main-empty').classList.remove('hidden');
   }
 
   renderSidebar();
   updateCombineBar();
+}
+
+// ── Document list (sidebar) ───────────────────────────────────────────────────
+
+function renderDocList() {
+  const list    = $('doc-list');
+  const countEl = $('docs-count');
+  const emptyEl = $('docs-empty');
+  if (!list) return;
+
+  list.innerHTML = '';
+  countEl.textContent = allDocuments.length;
+
+  if (!allDocuments.length) {
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+  emptyEl.classList.add('hidden');
+
+  [...allDocuments]
+    .sort((a, b) => new Date(b.generatedAt || 0) - new Date(a.generatedAt || 0))
+    .forEach(doc => list.appendChild(buildDocCard(doc)));
+}
+
+function buildDocCard(doc) {
+  const isActive  = activeDocMode && activeDoc?.id === doc.id;
+  const dateStr   = doc.generatedAt ? fmtDate(doc.generatedAt) : '';
+  const multiInfo = doc.sessionIds.length > 1 ? ` · ${doc.sessionIds.length} sessões` : '';
+
+  const card = document.createElement('div');
+  card.className = 'doc-card' + (isActive ? ' active' : '');
+  card.dataset.id = doc.id;
+
+  card.innerHTML =
+    `<div class="card-body">` +
+      `<div class="card-name" title="${escAttr(doc.title)}">${escHtml(doc.title)}</div>` +
+      `<div class="card-meta">${dateStr}${multiInfo}</div>` +
+    `</div>` +
+    `<button class="card-delete" title="Apagar documento" data-doc-id="${escAttr(doc.id)}">×</button>`;
+
+  card.querySelector('.card-delete').addEventListener('click', async e => {
+    e.stopPropagation();
+    await deleteDocument(e.currentTarget.dataset.docId);
+  });
+
+  card.addEventListener('click', e => {
+    if (e.target.classList.contains('card-delete')) return;
+    selectDocument(doc);
+  });
+
+  return card;
+}
+
+function selectDocument(doc) {
+  activeDocMode   = true;
+  activeDoc       = doc;
+  activeTab       = 'document';
+  editMode        = false;
+  markdownContent = doc.markdown || '';
+
+  // Deselect session cards; highlight doc card
+  document.querySelectorAll('.session-card').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.doc-card').forEach(c =>
+    c.classList.toggle('active', c.dataset.id === doc.id)
+  );
+
+  $('main-empty').classList.add('hidden');
+  $('session-detail').classList.remove('hidden');
+
+  renderDocumentDetail();
+  setupDocFeaturesOnce();
+}
+
+function renderDocumentDetail() {
+  $('detail-title').textContent = activeDoc?.title || 'Documento';
+  $('detail-meta').textContent  = activeDoc?.generatedAt
+    ? `${fmtDate(activeDoc.generatedAt)} · Documento gerado`
+    : 'Documento gerado';
+
+  $('recording-banner').classList.add('hidden');
+  $('resume-toast').classList.add('hidden');
+  $('detail-tabs').classList.add('hidden');
+  $('ref-badge').classList.add('hidden');
+
+  // Buttons available in document-only view
+  $('btn-chat').classList.remove('hidden');
+  $('btn-complement').classList.add('hidden');
+  $('btn-validate').classList.add('hidden');
+  $('btn-copy-md').classList.remove('hidden');
+  $('btn-download-html').classList.remove('hidden');
+  $('btn-download-docx').classList.remove('hidden');
+  $('btn-edit-doc').classList.toggle('hidden', editMode);
+  $('btn-resume-session').classList.add('hidden');
+  $('btn-generate-doc').classList.add('hidden');
+  $('btn-delete-session').classList.add('hidden');
+
+  $('gen-error').classList.add('hidden');
+
+  $('pane-steps').classList.add('hidden');
+  $('pane-document').classList.remove('hidden');
+  $('doc-view').classList.remove('hidden');
+  $('doc-edit').classList.add('hidden');
+
+  renderDocumentView();
+}
+
+async function deleteDocument(docId) {
+  if (!confirm('Apagar este documento? Esta ação não pode ser desfeita.')) return;
+
+  const data = await chrome.storage.local.get(['documentHistory']);
+  const docs  = (data.documentHistory || []).filter(d => d.id !== docId);
+  await chrome.storage.local.set({ documentHistory: docs });
+  allDocuments = docs;
+
+  if (activeDoc?.id === docId) {
+    activeDoc     = null;
+    activeDocMode = false;
+    $('session-detail').classList.add('hidden');
+    $('main-empty').classList.remove('hidden');
+  }
+
+  renderDocList();
 }
 
 // ── Document editing ──────────────────────────────────────────────────────────
@@ -793,14 +939,16 @@ function enterEditMode() {
 function exitEditMode(discard = false) {
   editMode = false;
   if (discard) activeDoc.markdown = editOriginal;
+  if (!discard) markdownContent = activeDoc.markdown;
 
   $('doc-view').classList.remove('hidden');
   $('doc-edit').classList.add('hidden');
-  ['btn-chat','btn-complement','btn-validate','btn-edit-doc',
-   'btn-copy-md','btn-download-html','btn-download-docx','btn-generate-doc']
-    .forEach(id => $(id)?.classList.remove('hidden'));
 
-  if (!discard) { markdownContent = activeDoc.markdown; renderDocumentView(); }
+  if (activeDocMode) {
+    renderDocumentDetail();
+  } else {
+    renderDetail(); // restores correct buttons and calls renderDocumentView via setTab
+  }
 }
 
 function updateEditorPreview() {
@@ -836,13 +984,14 @@ async function copyMarkdown() {
 }
 
 function downloadHtml() {
-  if (!markdownContent || !activeSession) return;
-  const html = buildHtmlExport(markdownContent, activeSession);
-  const blob = new Blob([html], { type: 'text/html; charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = sanitizeFilename(activeSession.title) + '.html';
+  if (!markdownContent) return;
+  const title = getActiveTitle();
+  const html  = buildHtmlExport(markdownContent, { title, steps: getActiveSteps() });
+  const blob  = new Blob([html], { type: 'text/html; charset=utf-8' });
+  const url   = URL.createObjectURL(blob);
+  const a     = document.createElement('a');
+  a.href      = url;
+  a.download  = sanitizeFilename(title) + '.html';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -850,8 +999,8 @@ function downloadHtml() {
 }
 
 function downloadDocx() {
-  if (!markdownContent || !activeSession) return;
-  exportToDocx(markdownContent, activeSession.title);
+  if (!markdownContent) return;
+  exportToDocx(markdownContent, getActiveTitle());
 }
 
 // ── Lightbox ──────────────────────────────────────────────────────────────────
@@ -1786,26 +1935,48 @@ async function startStreaming(config) {
 
   markdownContent = accum;
 
-  chrome.runtime.sendMessage({
+  await chrome.runtime.sendMessage({
     type: 'SAVE_GENERATED_DOC',
     sessionIds: config.sessionIds,
     title:      config.title,
     markdown:   markdownContent,
   }).catch(() => {});
 
-  // Refresh local documents so activeDoc is found
+  // Refresh local documents
   const fresh = await chrome.storage.local.get(['documentHistory']);
   allDocuments = fresh.documentHistory || [];
-  activeDoc    = findDocForSession(activeSession.id);
+
+  // Find the newly saved doc (match by sessionIds set)
+  const newDoc = allDocuments.find(d =>
+    d.sessionIds.length === config.sessionIds.length &&
+    config.sessionIds.every(id => d.sessionIds.includes(id))
+  ) || allDocuments[allDocuments.length - 1] || null;
+  activeDoc = newDoc;
+
+  const isCombined = config.sessionIds.length > 1;
+  if (isCombined) {
+    activeDocMode = true;
+    selectedIds.clear();
+    $('combine-bar').style.display = 'none';
+    document.querySelectorAll('.session-card').forEach(c => c.classList.remove('checked'));
+    document.querySelectorAll('.card-checkbox').forEach(c => { c.checked = false; });
+  } else {
+    activeDocMode = false;
+  }
 
   const usedStepIds = renderDocumentContent();
   renderScreenshots(usedStepIds);
-  setupRefBadge(activeSession?.refFiles);
+  if (!isCombined) setupRefBadge(activeSession?.refFiles);
   setupSectionRegen();
   setupLightboxOnDocument();
   setupDocFeaturesOnce();
-  renderDetail();  // show the new doc-specific action buttons
-  renderSidebar(); // update session card badge
+
+  if (isCombined) {
+    renderDocumentDetail();
+  } else {
+    renderDetail();
+  }
+  renderSidebar(); // also calls renderDocList
 }
 
 async function streamAnthropic(config, apiKey, onChunk) {

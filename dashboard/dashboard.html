@@ -6,7 +6,7 @@
   <title>DocFlow — Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="dashboard.css?v=3">
+  <link rel="stylesheet" href="dashboard.css?v=4">
 </head>
 <body>
 
@@ -41,18 +41,35 @@
 
     <!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
     <aside class="dash-sidebar">
-      <div class="sidebar-top">
-        <span class="sidebar-title">Sessões</span>
-        <span class="sidebar-count" id="sidebar-count">0</span>
+
+      <!-- Sessions section -->
+      <div class="sidebar-section sessions-section">
+        <div class="sidebar-top">
+          <span class="sidebar-title">Sessões</span>
+          <span class="sidebar-count" id="sidebar-count">0</span>
+        </div>
+        <div class="session-list" id="session-list">
+          <!-- populated by JS -->
+        </div>
+        <div class="sidebar-empty hidden" id="sidebar-empty">
+          <p>Ainda não tens sessões gravadas.</p>
+          <p class="sidebar-empty-hint">Usa o popup da extensão para iniciar uma gravação.</p>
+        </div>
       </div>
 
-      <div class="session-list" id="session-list">
-        <!-- populated by JS -->
-      </div>
-
-      <div class="sidebar-empty hidden" id="sidebar-empty">
-        <p>Ainda não tens sessões gravadas.</p>
-        <p class="sidebar-empty-hint">Usa o popup da extensão para iniciar uma gravação.</p>
+      <!-- Documents section -->
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section docs-section">
+        <div class="sidebar-top">
+          <span class="sidebar-title">Documentos</span>
+          <span class="sidebar-count" id="docs-count">0</span>
+        </div>
+        <div class="doc-list" id="doc-list">
+          <!-- populated by JS -->
+        </div>
+        <div class="sidebar-empty hidden" id="docs-empty">
+          <p>Nenhum documento gerado.</p>
+        </div>
       </div>
 
       <div class="sidebar-footer">
@@ -457,6 +474,6 @@
   </div>
 
   <script src="../sidebar/docx-export.js?v=2"></script>
-  <script src="dashboard.js?v=3"></script>
+  <script src="dashboard.js?v=4"></script>
 </body>
 </html>
