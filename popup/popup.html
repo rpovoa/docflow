@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DocFlow</title>
-  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="popup.css?v=2">
 </head>
 <body>
 
@@ -107,15 +107,8 @@
     </div>
 
     <button class="btn btn-primary" id="btn-generate">
-      ✨ Gerar Documento com IA
+      Ir para o Dashboard
     </button>
-
-    <div class="generating hidden" id="generating-state" role="status" aria-live="polite">
-      <span class="spinner" aria-hidden="true"></span>
-      A gerar documento...
-    </div>
-
-    <p class="error-msg hidden" id="gen-error" role="alert"></p>
 
     <button class="btn btn-secondary" id="btn-resume-session">
       ▶ Continuar gravação
@@ -162,6 +155,6 @@
     <button class="footer-settings-btn" id="btn-open-dashboard">⚙ Configurações · Dashboard</button>
   </div>
 
-  <script src="popup.js"></script>
+  <script src="popup.js?v=2"></script>
 </body>
 </html>

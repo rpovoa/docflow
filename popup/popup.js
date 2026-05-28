@@ -185,46 +185,13 @@ btnScreenshot.addEventListener('click', async () => {
   btnScreenshot.disabled = false;
 });
 
-// ── Done → Generate (US-09) ──────────────────────────────────────────────────
-
-function showGenError(msg) {
-  genErrorEl.textContent = msg;
-  genErrorEl.classList.remove('hidden');
-  generatingState.classList.add('hidden');
-  btnGenerate.classList.remove('hidden');
-}
+// ── Done → Go to Dashboard ────────────────────────────────────────────────────
 
 btnGenerate.addEventListener('click', async () => {
-  const s = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
-  const provider = s?.provider || 'anthropic';
-  const hasKey = provider === 'openai' ? s?.openaiUnlocked : s?.anthropicUnlocked;
-
-  if (!hasKey) {
-    $('no-key-msg').classList.remove('hidden');
-    return;
-  }
-  $('no-key-msg').classList.add('hidden');
-
-  genErrorEl.classList.add('hidden');
-  btnGenerate.classList.add('hidden');
-  generatingState.classList.remove('hidden');
-
-  let result;
-  try {
-    result = await chrome.runtime.sendMessage({ type: 'GENERATE_DOCUMENT' });
-  } catch (err) {
-    showGenError(`Erro de comunicação: ${err.message}`);
-    return;
-  }
-
-  if (result?.error) {
-    showGenError(result.error);
-    return;
-  }
-
-  chrome.tabs.create({ url: chrome.runtime.getURL('sidebar/result.html') });
-  generatingState.classList.add('hidden');
-  btnGenerate.classList.remove('hidden');
+  const { session } = await chrome.runtime.sendMessage({ type: 'GET_SESSION' });
+  const base = chrome.runtime.getURL('dashboard/dashboard.html');
+  const url  = session ? `${base}?manage=${encodeURIComponent(session.id)}` : base;
+  chrome.tabs.create({ url });
 });
 
 $('btn-go-settings').addEventListener('click', () => {
@@ -436,7 +403,7 @@ $('btn-generate-multi').addEventListener('click', async () => {
     return;
   }
 
-  chrome.tabs.create({ url: chrome.runtime.getURL('sidebar/result.html') });
+  chrome.tabs.create({ url: chrome.runtime.getURL('dashboard/dashboard.html') });
   $('generating-state-multi').classList.add('hidden');
   $('btn-generate-multi').classList.remove('hidden');
 });

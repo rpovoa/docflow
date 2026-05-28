@@ -22,10 +22,13 @@ const MSG = {
   LOCK_SESSION:      'LOCK_SESSION',
   REMOVE_KEY:        'REMOVE_KEY',
   ADD_NARRATION:     'ADD_NARRATION',
-  IMPROVE_TEXT:      'IMPROVE_TEXT',
-  CHAT_IMPROVE:      'CHAT_IMPROVE',
-  DELETE_STEP:       'DELETE_STEP',
-  STOP_AND_GENERATE: 'STOP_AND_GENERATE',
+  IMPROVE_TEXT:        'IMPROVE_TEXT',
+  CHAT_IMPROVE:        'CHAT_IMPROVE',
+  DELETE_STEP:         'DELETE_STEP',
+  STOP_AND_GENERATE:   'STOP_AND_GENERATE',
+  SAVE_GENERATED_DOC:  'SAVE_GENERATED_DOC',
+  VALIDATE_DOCUMENT:   'VALIDATE_DOCUMENT',
+  REGENERATE_SECTION:  'REGENERATE_SECTION',
 };
 
 // ── Built-in skills ───────────────────────────────────────────────────────────
@@ -1018,27 +1021,116 @@ async function generateDocument(sessionIds) {
     effectiveSystemPrompt += `\n\n━━━ INSTRUÇÕES PERSONALIZADAS ━━━\n\n${skillsBlock}`;
   }
 
+  // Validate API key exists before handing off to streaming
+  let model;
+  if (provider === 'openai') {
+    const apiKey = await getApiKey('openai', data);
+    model = _cfg.openaiModel || data.openaiModel || 'gpt-4o';
+    if (!apiKey) return { error: 'Chave API OpenAI não configurada. Abre o Dashboard → Configurações.' };
+  } else {
+    const apiKey = await getApiKey('anthropic', data);
+    model = _cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5';
+    if (!apiKey) return { error: 'Chave API Anthropic não configurada. Abre o Dashboard → Configurações.' };
+  }
+
+  // Store config for dashboard to pick up and stream directly
+  await chrome.storage.local.set({
+    pendingStreamConfig: {
+      provider,
+      model,
+      userMessage,
+      effectiveSystemPrompt,
+      sessionIds: sessions.map(s => s.id),
+      title: pendingSession.title,
+    },
+    pendingSession,
+  });
+  return { streaming: true };
+}
+
+async function saveGeneratedDoc(sessionIds, title, markdown) {
+  await saveDocumentToHistory(sessionIds, title, markdown);
+  await chrome.storage.local.set({ pendingDocument: markdown });
+  return { ok: true };
+}
+
+async function validateDocument(markdown, steps) {
+  const data = await chrome.storage.local.get([
+    'settings', 'provider', 'anthropicKey', 'anthropicModel', 'openaiKey', 'openaiModel', 'apiKey',
+  ]);
+  const cfg      = data.settings || {};
+  const provider = cfg.provider || data.provider || 'anthropic';
+  const apiKey   = await getApiKey(provider, data);
+  if (!apiKey) return { error: 'Chave de API não configurada. Vai às definições e adiciona a tua chave.' };
+
+  const model = provider === 'openai'
+    ? (cfg.openaiModel    || data.openaiModel    || 'gpt-4o')
+    : (cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5');
+
+  const stepsText = (steps || [])
+    .filter(s => s.type !== 'screenshot')
+    .map(s => formatStep(s))
+    .join('\n');
+
+  const validationPrompt =
+    `Valida o seguinte manual de utilizador comparando-o com os passos gravados durante a sessão.\n\n` +
+    `MANUAL GERADO:\n---\n${markdown.slice(0, 20000)}\n---\n\n` +
+    `PASSOS GRAVADOS:\n${stepsText}\n\n` +
+    `Analisa e responde APENAS com JSON válido no seguinte formato:\n` +
+    `{\n  "score": <0-100, percentagem de cobertura>,\n  "summary": "<frase curta sobre a qualidade geral>",\n` +
+    `  "issues": [\n    { "type": "missing", "description": "<funcionalidade ou passo não coberto no manual>" },\n` +
+    `    { "type": "inconsistent", "description": "<informação inconsistente>" }\n  ],\n` +
+    `  "ok": ["<aspecto bem documentado>"]\n}`;
+
+  const sysPrompt = 'És um revisor sénior de documentação técnica. Responde APENAS com JSON válido, sem texto antes ou depois.';
+
+  try {
+    let raw;
+    if (provider === 'openai') {
+      raw = await callOpenAIAPI(apiKey, model, validationPrompt, sysPrompt);
+    } else {
+      raw = await callAnthropicAPI(apiKey, model, validationPrompt, sysPrompt);
+    }
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { error: 'O modelo não devolveu JSON válido.' };
+    return { result: JSON.parse(jsonMatch[0]) };
+  } catch (err) {
+    console.error('[DocFlow] Validation failed:', err);
+    return { error: err.message };
+  }
+}
+
+async function regenerateSection(sectionMarkdown, instruction) {
+  const data = await chrome.storage.local.get([
+    'settings', 'provider', 'anthropicKey', 'anthropicModel', 'openaiKey', 'openaiModel', 'apiKey',
+  ]);
+  const cfg      = data.settings || {};
+  const provider = cfg.provider || data.provider || 'anthropic';
+  const apiKey   = await getApiKey(provider, data);
+  if (!apiKey) return { error: 'Chave de API não configurada.' };
+
+  const model = provider === 'openai'
+    ? (cfg.openaiModel    || data.openaiModel    || 'gpt-4o')
+    : (cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5');
+
+  const prompt =
+    `Reescreve a seguinte secção de um manual de utilizador em Português Europeu (PT-PT), aplicando a instrução fornecida.\n\n` +
+    `SECÇÃO ATUAL:\n---\n${sectionMarkdown}\n---\n\n` +
+    `INSTRUÇÃO: ${instruction}\n\n` +
+    `Responde APENAS com a secção reescrita em Markdown. Mantém o mesmo nível de cabeçalho e a estrutura geral.`;
+
+  const sysPrompt = 'És um especialista em documentação técnica em Português Europeu (PT-PT). Responde APENAS com Markdown, sem introdução ou texto extra.';
+
   try {
     let markdown;
-
     if (provider === 'openai') {
-      const apiKey = await getApiKey('openai', data);
-      const model  = _cfg.openaiModel || data.openaiModel || 'gpt-4o';
-      if (!apiKey) return { error: 'Chave API OpenAI não configurada. Abre o Dashboard → Configurações.' };
-      markdown = await callOpenAIAPI(apiKey, model, userMessage, effectiveSystemPrompt);
+      markdown = await callOpenAIAPI(apiKey, model, prompt, sysPrompt);
     } else {
-      const apiKey = await getApiKey('anthropic', data);
-      const model  = _cfg.anthropicModel || data.anthropicModel || 'claude-opus-4-5';
-      if (!apiKey) return { error: 'Chave API Anthropic não configurada. Abre o Dashboard → Configurações.' };
-      markdown = await callAnthropicAPI(apiKey, model, userMessage, effectiveSystemPrompt);
+      markdown = await callAnthropicAPI(apiKey, model, prompt, sysPrompt);
     }
-
-    const sessionIds = sessions.map(s => s.id);
-    await saveDocumentToHistory(sessionIds, pendingSession.title, markdown);
-    await chrome.storage.local.set({ pendingDocument: markdown, pendingSession });
     return { markdown };
   } catch (err) {
-    console.error('[DocFlow] Generation failed:', err);
+    console.error('[DocFlow] Section regen failed:', err);
     return { error: err.message };
   }
 }
@@ -1286,7 +1378,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await stopSession();
         const result = await generateDocument(null);
         if (!result?.error) {
-          try { await chrome.tabs.create({ url: chrome.runtime.getURL('sidebar/result.html') }); } catch (_) {}
+          try { await chrome.tabs.create({ url: chrome.runtime.getURL('dashboard/dashboard.html') }); } catch (_) {}
         }
         sendResponse(result || {});
       })();
@@ -1400,6 +1492,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chatImprove(message.history)
         .then(response => sendResponse({ response }))
         .catch(err     => sendResponse({ error: err.message }));
+      return true;
+
+    case MSG.SAVE_GENERATED_DOC:
+      saveGeneratedDoc(message.sessionIds, message.title, message.markdown)
+        .then(result => sendResponse(result))
+        .catch(err   => sendResponse({ error: err.message }));
+      return true;
+
+    case MSG.VALIDATE_DOCUMENT:
+      validateDocument(message.markdown, message.steps)
+        .then(result => sendResponse(result))
+        .catch(err   => sendResponse({ error: err.message }));
+      return true;
+
+    case MSG.REGENERATE_SECTION:
+      regenerateSection(message.sectionMarkdown, message.instruction)
+        .then(result => sendResponse(result))
+        .catch(err   => sendResponse({ error: err.message }));
       return true;
   }
 });

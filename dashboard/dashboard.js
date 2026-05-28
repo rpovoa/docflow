@@ -21,6 +21,22 @@ let editingSkillId  = null;      // null = adding new, string = editing existing
 let editingStepId      = null;
 let stepEditScreenshot = {}; // stepId → dataURL | null (remove) | undefined (unchanged)
 
+// ── Document viewer state ──────────────────────────────────────────────────────
+let markdownContent = '';
+const screenshotEls = new Map();   // stepId → <figure> in screenshots grid
+
+// Chat assistant state
+let chatHistory       = [];
+let chatSelectedRange = null;
+let chatSelectedText  = '';
+
+// Section regen state
+let _regenPopover    = null;
+let _regenCloseClick = null;
+
+// Flag to avoid double-binding global doc features
+let _docFeaturesSetUp = false;
+
 const $ = id => document.getElementById(id);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -34,6 +50,35 @@ const $ = id => document.getElementById(id);
     $('shortcut-hint').textContent = '⌘⇧D';
   } else {
     $('shortcut-hint').textContent = 'Ctrl+Shift+D';
+  }
+
+  // Check for pending generation triggered from popup
+  const stored = await chrome.storage.local.get(['pendingStreamConfig', 'pendingSession']);
+  if (stored.pendingStreamConfig && stored.pendingSession) {
+    const cfg      = stored.pendingStreamConfig;
+    const pendSess = stored.pendingSession;
+    await chrome.storage.local.remove('pendingStreamConfig');
+
+    const matched = allSessions.find(s => s.id === pendSess.id) || pendSess;
+    activeSession = matched;
+    activeDoc     = findDocForSession(activeSession.id);
+    activeTab     = 'document';
+
+    document.querySelectorAll('.session-card').forEach(c =>
+      c.classList.toggle('active', c.dataset.id === activeSession.id)
+    );
+    $('main-empty').classList.add('hidden');
+    $('session-detail').classList.remove('hidden');
+    renderDetail();
+    setTab('document');
+    await startStreaming(cfg);
+  } else {
+    // ?manage= param: show that session in steps mode (no auto-redirect to doc view)
+    const manageId = new URLSearchParams(window.location.search).get('manage');
+    if (manageId) {
+      const session = allSessions.find(s => s.id === manageId);
+      if (session) selectSession(session, false);
+    }
   }
 
   // Refresh when tab becomes visible again (user may have been recording)
@@ -140,17 +185,17 @@ function updateCombineBar() {
 
 // ── Session detail ─────────────────────────────────────────────────────────────
 
-function selectSession(session) {
+function selectSession(session, autoDoc = true) {
   activeView = 'sessions';
   $('settings-panel').classList.add('hidden');
   $('btn-nav-settings').classList.remove('active');
 
   activeSession = session;
   activeDoc     = findDocForSession(session.id);
-  activeTab     = activeDoc ? 'document' : 'steps';
+  // Auto-open doc tab when session has a document (unless explicitly told not to)
+  activeTab     = (activeDoc && autoDoc) ? 'document' : 'steps';
   editMode      = false;
 
-  // Update sidebar active state
   document.querySelectorAll('.session-card').forEach(c => {
     c.classList.toggle('active', c.dataset.id === session.id);
   });
@@ -190,8 +235,12 @@ function renderDetail() {
   $('detail-tabs').classList.toggle('hidden', !activeDoc);
 
   // Button visibility
+  $('btn-chat').classList.toggle('hidden', !activeDoc);
+  $('btn-complement').classList.toggle('hidden', !activeDoc);
+  $('btn-validate').classList.toggle('hidden', !activeDoc);
   $('btn-copy-md').classList.toggle('hidden', !activeDoc);
   $('btn-download-html').classList.toggle('hidden', !activeDoc);
+  $('btn-download-docx').classList.toggle('hidden', !activeDoc);
   $('btn-edit-doc').classList.toggle('hidden', !activeDoc || editMode);
   // "Continuar" only for stopped sessions
   $('btn-resume-session').classList.toggle('hidden', isRecording);
@@ -552,22 +601,33 @@ function buildStepLabelPlain(step) {
 
 function renderDocumentView() {
   if (!activeDoc) return;
+  markdownContent = activeDoc.markdown;
+  const usedStepIds = renderDocumentContent();
+  renderScreenshots(usedStepIds);
+  setupRefBadge(activeSession?.refFiles);
+  setupSectionRegen();
+  setupLightboxOnDocument();
+  setupDocFeaturesOnce();
+  $('doc-view').classList.remove('hidden');
+  $('doc-edit').classList.add('hidden');
+}
 
-  // Build step index for screenshot markers
+function renderDocumentContent() {
   const byIndex = new Map(
     (activeSession.steps || [])
       .filter(s => s.screenshot)
       .map(s => [s.index, s])
   );
 
-  let html = markdownToHtml(activeDoc.markdown);
+  let html = markdownToHtml(markdownContent);
+  const usedStepIds = new Set();
 
-  // Replace {{screenshot:N}} markers
   html = html.replace(/\{\{screenshot:(\d+)\}\}/g, (_, n) => {
     const step = byIndex.get(parseInt(n, 10));
     if (!step) return '';
+    usedStepIds.add(step.id);
     const caption = annotationLabel(step);
-    return `<figure class="inline-screenshot" data-src="${escAttr(step.screenshot)}" data-caption="${escAttr(caption)}" data-step-id="${escAttr(step.id)}">` +
+    return `<figure class="inline-screenshot" data-step-id="${escAttr(step.id)}">` +
            `<div class="shot-wrap">` +
            `<img src="${step.screenshot}" alt="${escAttr(caption)}" loading="lazy">` +
            buildAnnotationSVG(step.annotation) +
@@ -576,17 +636,72 @@ function renderDocumentView() {
            `</figure>`;
   });
 
-  $('doc-rendered').innerHTML = html;
-  $('doc-view').classList.remove('hidden');
-  $('doc-edit').classList.add('hidden');
+  $('document-content').innerHTML = html;
+  return usedStepIds;
+}
 
-  // Click on inline screenshots → lightbox
-  $('doc-rendered').addEventListener('click', e => {
+function renderScreenshots(usedStepIds = new Set()) {
+  const stepsWithShot = (activeSession.steps || []).filter(
+    s => s.screenshot && !usedStepIds.has(s.id)
+  );
+  const section = $('screenshots-section');
+
+  if (!stepsWithShot.length) {
+    section?.classList.add('hidden');
+    return;
+  }
+
+  section.classList.remove('hidden');
+  $('screenshot-count').textContent = stepsWithShot.length;
+  const grid = $('screenshots-grid');
+  grid.innerHTML = '';
+  screenshotEls.clear();
+
+  stepsWithShot.forEach(step => {
+    const fig      = document.createElement('figure');
+    fig.className  = 'screenshot-item';
+    fig.dataset.stepId = step.id;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'shot-wrap';
+
+    const img   = document.createElement('img');
+    img.src     = step.screenshot;
+    img.alt     = `Passo ${step.index}: ${buildStepLabelPlain(step)}`;
+    img.loading = 'lazy';
+    wrap.appendChild(img);
+
+    const svgHtml = buildAnnotationSVG(step.annotation, 'slice');
+    if (svgHtml) wrap.insertAdjacentHTML('beforeend', svgHtml);
+
+    fig.appendChild(wrap);
+    fig.addEventListener('click', () => openLightbox(step.screenshot, annotationLabel(step), step.annotation));
+
+    const caption = document.createElement('figcaption');
+    caption.textContent = `${step.index}. ${annotationLabel(step)}`;
+    fig.appendChild(caption);
+
+    grid.appendChild(fig);
+    screenshotEls.set(step.id, fig);
+  });
+}
+
+function setupLightboxOnDocument() {
+  const el = $('document-content');
+  if (!el || el.dataset.lightboxBound) return;
+  el.dataset.lightboxBound = '1';
+  el.addEventListener('click', e => {
     const fig = e.target.closest('.inline-screenshot');
     if (!fig) return;
     const step = (activeSession.steps || []).find(s => s.id === fig.dataset.stepId);
-    openLightbox(fig.dataset.src, fig.dataset.caption, step?.annotation);
-  }, { once: false });
+    if (step) openLightbox(step.screenshot, annotationLabel(step), step.annotation);
+  });
+}
+
+function setupDocFeaturesOnce() {
+  if (_docFeaturesSetUp) return;
+  _docFeaturesSetUp = true;
+  setupChat();
 }
 
 // ── Generate ──────────────────────────────────────────────────────────────────
@@ -611,25 +726,14 @@ async function generateFor(sessionIds) {
   }
 
   showGenOverlay(false);
-  await refreshData();
 
-  // Find the newly stored document
-  if (Array.isArray(sessionIds) && sessionIds.length === 1) {
-    activeSession = allSessions.find(s => s.id === sessionIds[0]) || activeSession;
-    activeDoc     = findDocForSession(sessionIds[0]);
-    renderDetail();
+  if (result?.streaming) {
+    const cfg = await chrome.storage.local.get(['pendingStreamConfig']);
+    if (!cfg.pendingStreamConfig) { showGenError('Erro ao iniciar streaming.'); return; }
+    await chrome.storage.local.remove('pendingStreamConfig');
     setTab('document');
-  } else {
-    // Combined: find the most recent doc that contains all selected sessions
-    const combined = allDocuments.find(d =>
-      sessionIds.every(id => d.sessionIds.includes(id))
-    );
-    if (combined) {
-      chrome.tabs.create({ url: chrome.runtime.getURL('sidebar/result.html') });
-    }
+    await startStreaming(cfg.pendingStreamConfig);
   }
-
-  renderSidebar();
 }
 
 function showGenOverlay(show) {
@@ -671,15 +775,14 @@ async function deleteSession(id) {
 
 function enterEditMode() {
   if (!activeDoc) return;
-  editMode    = true;
+  editMode     = true;
   editOriginal = activeDoc.markdown;
 
   $('doc-view').classList.add('hidden');
   $('doc-edit').classList.remove('hidden');
-  $('btn-edit-doc').classList.add('hidden');
-  $('btn-copy-md').classList.add('hidden');
-  $('btn-download-html').classList.add('hidden');
-  $('btn-generate-doc').classList.add('hidden');
+  ['btn-chat','btn-complement','btn-validate','btn-edit-doc',
+   'btn-copy-md','btn-download-html','btn-download-docx','btn-generate-doc']
+    .forEach(id => $(id)?.classList.add('hidden'));
 
   const ta = $('editor-textarea');
   ta.value = activeDoc.markdown;
@@ -693,12 +796,11 @@ function exitEditMode(discard = false) {
 
   $('doc-view').classList.remove('hidden');
   $('doc-edit').classList.add('hidden');
-  $('btn-edit-doc').classList.remove('hidden');
-  $('btn-copy-md').classList.remove('hidden');
-  $('btn-download-html').classList.remove('hidden');
-  $('btn-generate-doc').classList.remove('hidden');
+  ['btn-chat','btn-complement','btn-validate','btn-edit-doc',
+   'btn-copy-md','btn-download-html','btn-download-docx','btn-generate-doc']
+    .forEach(id => $(id)?.classList.remove('hidden'));
 
-  if (!discard) renderDocumentView();
+  if (!discard) { markdownContent = activeDoc.markdown; renderDocumentView(); }
 }
 
 function updateEditorPreview() {
@@ -709,8 +811,8 @@ function updateEditorPreview() {
 async function saveEdit() {
   const md = $('editor-textarea').value;
   activeDoc.markdown = md;
+  markdownContent    = md;
 
-  // Persist to documentHistory
   const data = await chrome.storage.local.get(['documentHistory']);
   const docs = data.documentHistory || [];
   const idx  = docs.findIndex(d => d.id === activeDoc.id);
@@ -724,8 +826,8 @@ async function saveEdit() {
 // ── Export ────────────────────────────────────────────────────────────────────
 
 async function copyMarkdown() {
-  if (!activeDoc) return;
-  await navigator.clipboard.writeText(activeDoc.markdown);
+  if (!markdownContent) return;
+  await navigator.clipboard.writeText(markdownContent);
   const btn = $('btn-copy-md');
   btn.classList.add('copied');
   const prev = btn.innerHTML;
@@ -734,8 +836,8 @@ async function copyMarkdown() {
 }
 
 function downloadHtml() {
-  if (!activeDoc || !activeSession) return;
-  const html = buildHtmlExport(activeDoc.markdown, activeSession);
+  if (!markdownContent || !activeSession) return;
+  const html = buildHtmlExport(markdownContent, activeSession);
   const blob = new Blob([html], { type: 'text/html; charset=utf-8' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
@@ -745,6 +847,11 @@ function downloadHtml() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function downloadDocx() {
+  if (!markdownContent || !activeSession) return;
+  exportToDocx(markdownContent, activeSession.title);
 }
 
 // ── Lightbox ──────────────────────────────────────────────────────────────────
@@ -875,6 +982,18 @@ function setupListeners() {
     }
   });
 
+  // Chat assistant toggle
+  $('btn-chat').addEventListener('click', toggleChat);
+
+  // Validate
+  $('btn-validate').addEventListener('click', runValidation);
+
+  // Complement
+  $('btn-complement').addEventListener('click', startComplement);
+
+  // DOCX download
+  $('btn-download-docx').addEventListener('click', downloadDocx);
+
   // Edit
   $('btn-edit-doc').addEventListener('click', enterEditMode);
   $('btn-save-edit').addEventListener('click', saveEdit);
@@ -897,9 +1016,10 @@ function setupListeners() {
   $('lightbox').addEventListener('click', e => { if (e.target === $('lightbox')) closeLightbox(); });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      if (!$('lightbox').classList.contains('hidden')) closeLightbox();
-      else if (editingStepId) { delete stepEditScreenshot[editingStepId]; editingStepId = null; renderSteps(); }
-      else if (editMode) exitEditMode(true);
+      if (!$('chat-panel').classList.contains('hidden')) { closeChat(); return; }
+      if (!$('lightbox').classList.contains('hidden')) { closeLightbox(); return; }
+      if (editingStepId) { delete stepEditScreenshot[editingStepId]; editingStepId = null; renderSteps(); return; }
+      if (editMode) exitEditMode(true);
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 's' && editMode) {
       e.preventDefault();
@@ -1441,29 +1561,60 @@ function setupSettingsListeners() {
   });
 }
 
-// ── Markdown → HTML ───────────────────────────────────────────────────────────
+// ── Markdown → HTML (with table support) ─────────────────────────────────────
 
 function markdownToHtml(md) {
   const lines = md.split('\n');
   let html = '';
-  let inOl = false, inUl = false, inP = false;
+  let inOl = false, inUl = false, inP = false, inTable = false;
+  let tableLines = [];
 
-  function closeLists() {
-    if (inOl) { html += '</ol>\n'; inOl = false; }
-    if (inUl) { html += '</ul>\n'; inUl = false; }
-  }
-  function closeP() {
-    if (inP) { html += '</p>\n'; inP = false; }
-  }
   function inline(raw) {
     return escHtml(raw)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.+?)\*/g,     '<em>$1</em>')
       .replace(/`(.+?)`/g,       '<code>$1</code>');
   }
+  function closeLists() {
+    if (inOl) { html += '</ol>\n'; inOl = false; }
+    if (inUl) { html += '</ul>\n'; inUl = false; }
+  }
+  function closeP() { if (inP) { html += '</p>\n'; inP = false; } }
+  function flushTable() {
+    if (!inTable) return;
+    inTable = false;
+    if (tableLines.length < 2) { tableLines = []; return; }
+    const parseCells = line =>
+      line.replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+    const headers = parseCells(tableLines[0]);
+    const rows    = tableLines.slice(2).map(parseCells);
+    tableLines = [];
+    html += '<table>\n<thead>\n<tr>\n';
+    headers.forEach(h => { html += `<th>${h}</th>\n`; });
+    html += '</tr>\n</thead>\n';
+    if (rows.length) {
+      html += '<tbody>\n';
+      rows.forEach(row => {
+        html += '<tr>\n';
+        row.forEach(cell => { html += `<td>${cell}</td>\n`; });
+        html += '</tr>\n';
+      });
+      html += '</tbody>\n';
+    }
+    html += '</table>\n';
+  }
 
   for (const line of lines) {
     const t = line.trim();
+    if (t.startsWith('|')) {
+      closeP(); closeLists();
+      inTable = true;
+      tableLines.push(t);
+      continue;
+    } else if (inTable) {
+      flushTable();
+    }
+
     if (!t) { closeP(); closeLists(); continue; }
 
     if (t.startsWith('### ')) {
@@ -1491,7 +1642,7 @@ function markdownToHtml(md) {
       html += inline(t);
     }
   }
-  closeP(); closeLists();
+  closeP(); closeLists(); flushTable();
   return html;
 }
 
@@ -1573,4 +1724,681 @@ function sanitizeFilename(name) {
   return (name || 'docflow')
     .replace(/[<>:"/\\|?*]/g, '').trim()
     .replace(/\s+/g, '_').slice(0, 80) || 'docflow';
+}
+
+// ── Streaming document generation ─────────────────────────────────────────────
+
+async function startStreaming(config) {
+  const contentEl = $('document-content');
+  contentEl.innerHTML =
+    '<div class="stream-init"><div class="stream-cursor-block"></div>' +
+    '<span>A gerar documentação…</span></div>';
+
+  let apiKey;
+  try {
+    const [sess, local] = await Promise.all([
+      chrome.storage.session.get(['unlockedKeys']).catch(() => ({})),
+      chrome.storage.local.get(['anthropicKey', 'openaiKey', 'apiKey']),
+    ]);
+    const uk = sess.unlockedKeys || {};
+    apiKey = config.provider === 'openai'
+      ? (uk.openaiKey  || local.openaiKey)
+      : (uk.anthropicKey || local.anthropicKey || local.apiKey);
+  } catch (err) {
+    contentEl.innerHTML = `<div class="stream-error">Erro ao obter chave de API: ${escHtml(err.message)}</div>`;
+    return;
+  }
+
+  if (!apiKey) {
+    contentEl.innerHTML =
+      '<div class="stream-error">Chave de API não configurada. ' +
+      'Abre o Dashboard → Configurações.</div>';
+    return;
+  }
+
+  let accum = '';
+  let lastRender = 0;
+  const RENDER_MS = 120;
+
+  function onChunk(text) {
+    accum += text;
+    const now = Date.now();
+    if (now - lastRender > RENDER_MS) {
+      contentEl.innerHTML =
+        markdownToHtml(accum) +
+        '<span class="stream-cursor-inline" aria-hidden="true"></span>';
+      lastRender = now;
+    }
+  }
+
+  try {
+    if (config.provider === 'openai') {
+      await streamOpenAI(config, apiKey, onChunk);
+    } else {
+      await streamAnthropic(config, apiKey, onChunk);
+    }
+  } catch (err) {
+    if (!accum) {
+      contentEl.innerHTML = `<div class="stream-error">${escHtml(err.message)}</div>`;
+      return;
+    }
+  }
+
+  markdownContent = accum;
+
+  chrome.runtime.sendMessage({
+    type: 'SAVE_GENERATED_DOC',
+    sessionIds: config.sessionIds,
+    title:      config.title,
+    markdown:   markdownContent,
+  }).catch(() => {});
+
+  // Refresh local documents so activeDoc is found
+  const fresh = await chrome.storage.local.get(['documentHistory']);
+  allDocuments = fresh.documentHistory || [];
+  activeDoc    = findDocForSession(activeSession.id);
+
+  const usedStepIds = renderDocumentContent();
+  renderScreenshots(usedStepIds);
+  setupRefBadge(activeSession?.refFiles);
+  setupSectionRegen();
+  setupLightboxOnDocument();
+  setupDocFeaturesOnce();
+  renderDetail();  // show the new doc-specific action buttons
+  renderSidebar(); // update session card badge
+}
+
+async function streamAnthropic(config, apiKey, onChunk) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'prompt-caching-2024-07-31',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model:      config.model,
+      max_tokens: 8192,
+      stream:     true,
+      system:     [{ type: 'text', text: config.effectiveSystemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages:   [{ role: 'user', content: config.userMessage }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Erro Anthropic: ${response.status}`);
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let   buf     = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (raw === '[DONE]') return;
+      try {
+        const ev = JSON.parse(raw);
+        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+          onChunk(ev.delta.text);
+        }
+      } catch (_) {}
+    }
+  }
+}
+
+async function streamOpenAI(config, apiKey, onChunk) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model:      config.model,
+      max_tokens: 8192,
+      stream:     true,
+      messages:   [
+        { role: 'system', content: config.effectiveSystemPrompt },
+        { role: 'user',   content: config.userMessage },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Erro OpenAI: ${response.status}`);
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let   buf     = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (raw === '[DONE]') return;
+      try {
+        const ev      = JSON.parse(raw);
+        const content = ev.choices?.[0]?.delta?.content;
+        if (content) onChunk(content);
+      } catch (_) {}
+    }
+  }
+}
+
+// ── Reference badge ───────────────────────────────────────────────────────────
+
+function setupRefBadge(refFiles) {
+  const badge   = $('ref-badge');
+  const popover = $('ref-popover');
+  const list    = $('ref-popover-list');
+  if (!badge) return;
+
+  if (!refFiles?.length) {
+    badge.classList.add('hidden');
+    return;
+  }
+
+  const n = refFiles.length;
+  badge.textContent = `📚 ${n} referência${n > 1 ? 's' : ''}`;
+  badge.classList.remove('hidden');
+
+  list.innerHTML = refFiles.map(f =>
+    `<li class="ref-popover-item">` +
+    `<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" class="ref-file-icon">` +
+    `<path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>` +
+    `</svg><span>${escHtml(f)}</span></li>`
+  ).join('');
+
+  if (badge.dataset.popoverBound) return;
+  badge.dataset.popoverBound = '1';
+
+  badge.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!popover.classList.contains('hidden')) { popover.classList.add('hidden'); return; }
+    const r = badge.getBoundingClientRect();
+    popover.style.top  = `${r.bottom + 6}px`;
+    popover.style.left = `${r.left}px`;
+    popover.classList.remove('hidden');
+  });
+  document.addEventListener('click', e => {
+    if (!popover.contains(e.target) && e.target !== badge) popover.classList.add('hidden');
+  });
+}
+
+// ── Complement ────────────────────────────────────────────────────────────────
+
+async function startComplement() {
+  const btn   = $('btn-complement');
+  const toast = $('complement-toast');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'START_SESSION',
+      title: activeSession.title,
+      complementOf: {
+        sessionId: activeSession.id,
+        title:     activeSession.title,
+        markdown:  markdownContent,
+      },
+    });
+    btn.innerHTML = '✓ Gravação iniciada';
+    btn.classList.add('complement-active');
+    toast.classList.remove('hidden');
+    setTimeout(() => toast.classList.add('hidden'), 8000);
+  } catch (err) {
+    btn.disabled = false;
+    console.error('[DocFlow] Failed to start complement session:', err);
+  }
+}
+
+// ── Validation ────────────────────────────────────────────────────────────────
+
+async function runValidation() {
+  const btn   = $('btn-validate');
+  const panel = $('validation-panel');
+  if (!panel || !btn) return;
+
+  btn.disabled = true;
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML =
+    '<svg class="spin-icon" width="13" height="13" viewBox="0 0 20 20" fill="currentColor">' +
+    '<path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>' +
+    '</svg> A validar…';
+
+  panel.classList.remove('hidden');
+  panel.innerHTML = '<div class="validation-loading"><div class="spinner-sm"></div> A analisar o documento…</div>';
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type:     'VALIDATE_DOCUMENT',
+      markdown: markdownContent,
+      steps:    activeSession.steps,
+    });
+
+    btn.disabled  = false;
+    btn.innerHTML = originalHtml;
+
+    if (result?.error) {
+      panel.innerHTML = `<div class="validation-error">${escHtml(result.error)}</div>`;
+      return;
+    }
+    renderValidationResult(result.result);
+  } catch (err) {
+    btn.disabled  = false;
+    btn.innerHTML = originalHtml;
+    panel.innerHTML = `<div class="validation-error">${escHtml(err.message)}</div>`;
+  }
+}
+
+function renderValidationResult(data) {
+  const panel = $('validation-panel');
+  const score = Math.round(data.score ?? 0);
+  const scoreColor = score >= 80 ? 'var(--green)' : score >= 55 ? '#f59e0b' : '#ef4444';
+
+  let html =
+    `<div class="validation-header">` +
+      `<div class="validation-score" style="color:${scoreColor}">${score}<span>%</span></div>` +
+      `<div class="validation-summary">${escHtml(data.summary || '')}</div>` +
+      `<button class="validation-close" id="validation-close">✕</button>` +
+    `</div>`;
+
+  if (data.issues?.length) {
+    html += `<div class="validation-section"><div class="validation-section-title">Pontos a melhorar</div>`;
+    data.issues.forEach(issue => {
+      html +=
+        `<div class="validation-item validation-issue">` +
+        `<span class="vi-icon">${issue.type === 'missing' ? '⚠' : '⚡'}</span>` +
+        `<span>${escHtml(issue.description)}</span></div>`;
+    });
+    html += '</div>';
+  }
+  if (data.ok?.length) {
+    html += `<div class="validation-section"><div class="validation-section-title">Pontos positivos</div>`;
+    data.ok.forEach(item => {
+      html +=
+        `<div class="validation-item validation-ok">` +
+        `<span class="vi-icon">✓</span><span>${escHtml(item)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  panel.innerHTML = html;
+  $('validation-close').addEventListener('click', () => panel.classList.add('hidden'));
+}
+
+// ── Section regeneration ──────────────────────────────────────────────────────
+
+function setupSectionRegen() {
+  const contentEl = $('document-content');
+  if (!contentEl) return;
+  contentEl.querySelectorAll('h2, h3').forEach(h => {
+    if (h.querySelector('.section-regen-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'section-regen-btn';
+    btn.title     = 'Regenerar esta secção com IA';
+    btn.innerHTML =
+      '<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">' +
+      '<path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>' +
+      '</svg>';
+    h.appendChild(btn);
+    btn.addEventListener('click', e => { e.stopPropagation(); openRegenPopover(h, btn); });
+  });
+}
+
+function openRegenPopover(heading, triggerBtn) {
+  closeRegenPopover();
+  const popover = document.createElement('div');
+  popover.className = 'regen-popover';
+  popover.id        = 'regen-popover';
+
+  const headingText = heading.childNodes[0]?.textContent?.trim() || heading.textContent.trim();
+  popover.innerHTML =
+    `<div class="regen-popover-title">Regenerar secção</div>` +
+    `<div class="regen-popover-heading">${escHtml(headingText)}</div>` +
+    `<textarea class="regen-popover-input" rows="2" ` +
+      `placeholder="Instrução… ex: simplifica, adiciona mais detalhe, torna mais formal"></textarea>` +
+    `<div class="regen-popover-actions">` +
+      `<button class="regen-cancel">Cancelar</button>` +
+      `<button class="regen-submit">Regenerar</button>` +
+    `</div>` +
+    `<div class="regen-status hidden"></div>`;
+
+  document.body.appendChild(popover);
+  _regenPopover = popover;
+
+  const rect = triggerBtn.getBoundingClientRect();
+  const popW = 300;
+  popover.style.position = 'fixed';
+  popover.style.top      = `${rect.bottom + 6}px`;
+  popover.style.left     = `${Math.max(8, Math.min(rect.left, window.innerWidth - popW - 8))}px`;
+  popover.style.width    = `${popW}px`;
+  popover.style.zIndex   = '500';
+
+  popover.querySelector('.regen-popover-input').focus();
+  popover.querySelector('.regen-cancel').addEventListener('click', closeRegenPopover);
+
+  async function submit() {
+    const instruction = popover.querySelector('.regen-popover-input').value.trim();
+    if (!instruction) return;
+    await doSectionRegen(heading, instruction, popover);
+  }
+  popover.querySelector('.regen-submit').addEventListener('click', submit);
+  popover.querySelector('.regen-popover-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+    if (e.key === 'Escape') closeRegenPopover();
+  });
+
+  _regenCloseClick = e => {
+    if (_regenPopover && !_regenPopover.contains(e.target)) closeRegenPopover();
+  };
+  setTimeout(() => document.addEventListener('mousedown', _regenCloseClick), 0);
+}
+
+function closeRegenPopover() {
+  if (_regenCloseClick) document.removeEventListener('mousedown', _regenCloseClick);
+  _regenCloseClick = null;
+  _regenPopover?.remove();
+  _regenPopover = null;
+}
+
+function extractSectionMarkdown(headingText, headingLevel) {
+  const lines  = markdownContent.split('\n');
+  const prefix = '#'.repeat(headingLevel) + ' ';
+  const stripMd = t => t.replace(/\*\*/g, '').replace(/\*/g, '').replace(/`/g, '').trim();
+
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(prefix)) continue;
+    if (stripMd(lines[i].slice(prefix.length)) === stripMd(headingText)) { start = i; break; }
+  }
+  if (start === -1) return null;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,6}) /);
+    if (m && m[1].length <= headingLevel) { end = i; break; }
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+async function doSectionRegen(heading, instruction, popover) {
+  const submitBtn = popover.querySelector('.regen-submit');
+  const statusEl  = popover.querySelector('.regen-status');
+  submitBtn.disabled    = true;
+  submitBtn.textContent = 'A regenerar…';
+  statusEl.classList.remove('hidden');
+  statusEl.textContent  = 'A contactar a IA…';
+
+  const level       = parseInt(heading.tagName[1], 10);
+  const headingText = heading.childNodes[0]?.textContent?.trim() || heading.textContent.trim();
+  const sectionMd   = extractSectionMarkdown(headingText, level);
+
+  if (!sectionMd) {
+    statusEl.textContent = 'Não foi possível localizar a secção no Markdown.';
+    submitBtn.disabled = false; submitBtn.textContent = 'Regenerar';
+    return;
+  }
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: 'REGENERATE_SECTION', sectionMarkdown: sectionMd, instruction,
+    });
+
+    if (result?.error) {
+      statusEl.textContent = `Erro: ${result.error}`;
+      submitBtn.disabled = false; submitBtn.textContent = 'Regenerar';
+      return;
+    }
+
+    markdownContent = markdownContent.replace(sectionMd, result.markdown);
+    closeRegenPopover();
+    renderDocumentContent();
+    setupSectionRegen();
+
+    const allH = $('document-content').querySelectorAll('h2, h3');
+    for (const h of allH) {
+      const ht = h.childNodes[0]?.textContent?.trim() || h.textContent.trim();
+      if (ht === headingText) {
+        h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        h.classList.add('regen-highlight');
+        setTimeout(() => h.classList.remove('regen-highlight'), 2000);
+        break;
+      }
+    }
+  } catch (err) {
+    statusEl.textContent = `Erro: ${err.message}`;
+    submitBtn.disabled = false; submitBtn.textContent = 'Regenerar';
+  }
+}
+
+// ── Chat assistant ────────────────────────────────────────────────────────────
+
+function setupChat() {
+  const floatBtn  = $('btn-chat-select');
+  const panel     = $('chat-panel');
+  const closeBtn  = $('chat-close');
+  const clearBtn  = $('chat-clear');
+  const sendBtn   = $('chat-send');
+  const inputEl   = $('chat-input');
+  const ctxRemove = $('chat-ctx-remove');
+
+  $('document-content').addEventListener('mouseup', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) { floatBtn.classList.add('hidden'); return; }
+    const text = sel.toString().trim();
+    if (text.length < 10) { floatBtn.classList.add('hidden'); return; }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    floatBtn.style.top  = `${rect.bottom + 8}px`;
+    floatBtn.style.left = `${Math.max(0, Math.min(rect.left, window.innerWidth - 160))}px`;
+    floatBtn.classList.remove('hidden');
+  });
+
+  document.addEventListener('mousedown', e => {
+    if (e.target === floatBtn) return;
+    if (!e.target.closest('#document-content')) floatBtn.classList.add('hidden');
+  });
+
+  floatBtn.addEventListener('click', () => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    chatSelectedRange = sel.getRangeAt(0).cloneRange();
+    chatSelectedText  = sel.toString().trim();
+    sel.removeAllRanges();
+    floatBtn.classList.add('hidden');
+    setContextBar(chatSelectedText);
+    openChat();
+    inputEl.focus();
+  });
+
+  closeBtn.addEventListener('click', closeChat);
+
+  clearBtn.addEventListener('click', () => {
+    chatHistory = [];
+    chatSelectedRange = null;
+    chatSelectedText  = '';
+    $('chat-messages').innerHTML =
+      `<div class="chat-empty" id="chat-empty">
+        <div class="chat-empty-icon">💬</div>
+        <p>Seleciona texto no documento e clica em <strong>Enviar para chat</strong> para melhorá-lo com instruções.</p>
+        <p style="margin-top:8px;font-size:12px">Ou escreve diretamente uma pergunta ou instrução.</p>
+      </div>`;
+    $('chat-ctx-bar').classList.add('hidden');
+  });
+
+  ctxRemove.addEventListener('click', () => {
+    chatSelectedRange = null;
+    chatSelectedText  = '';
+    $('chat-ctx-bar').classList.add('hidden');
+  });
+
+  sendBtn.addEventListener('click', sendChatMessage);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(); }
+  });
+}
+
+function openChat() {
+  $('chat-panel').classList.remove('hidden');
+  $('btn-chat').classList.add('btn-chat-active');
+}
+
+function closeChat() {
+  $('chat-panel').classList.add('hidden');
+  $('btn-chat').classList.remove('btn-chat-active');
+}
+
+function toggleChat() {
+  if ($('chat-panel').classList.contains('hidden')) {
+    openChat();
+    $('chat-input').focus();
+  } else {
+    closeChat();
+  }
+}
+
+function setContextBar(text) {
+  $('chat-ctx-text').textContent = text.length > 80 ? text.slice(0, 80) + '…' : text;
+  $('chat-ctx-bar').classList.remove('hidden');
+}
+
+async function sendChatMessage() {
+  const inputEl     = $('chat-input');
+  const instruction = inputEl.value.trim();
+  if (!instruction) return;
+
+  const savedRange = chatSelectedRange;
+  const savedText  = chatSelectedText;
+  let userContent  = instruction;
+  if (savedText) userContent = `[TEXTO SELECIONADO]\n${savedText}\n[/TEXTO SELECIONADO]\n\n${instruction}`;
+
+  appendUserMessage(instruction, savedText);
+  chatHistory.push({ role: 'user', content: userContent });
+
+  inputEl.value     = '';
+  chatSelectedRange = null;
+  chatSelectedText  = '';
+  $('chat-ctx-bar').classList.add('hidden');
+
+  const messagesEl = $('chat-messages');
+  const typingEl   = document.createElement('div');
+  typingEl.className = 'chat-msg chat-msg-ai';
+  typingEl.innerHTML = '<div class="chat-typing"><span></span><span></span><span></span></div>';
+  messagesEl.appendChild(typingEl);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'CHAT_IMPROVE', history: chatHistory });
+    typingEl.remove();
+    if (result?.error) throw new Error(result.error);
+
+    const raw           = result?.response || '';
+    const improvedMatch = raw.match(/\[MELHORIA\]([\s\S]*?)\[\/MELHORIA\]/);
+    const improved      = improvedMatch ? improvedMatch[1].trim() : null;
+    const explanation   = raw.replace(/\[MELHORIA\][\s\S]*?\[\/MELHORIA\]/, '').trim();
+
+    chatHistory.push({ role: 'assistant', content: raw });
+    appendAssistantMessage(explanation, improved, savedRange, savedText);
+  } catch (err) {
+    typingEl.remove();
+    const errorEl = document.createElement('div');
+    errorEl.className = 'chat-msg chat-msg-ai';
+    errorEl.innerHTML = `<div class="chat-error">${escHtml(err.message || 'Erro ao contactar o assistente.')}</div>`;
+    messagesEl.appendChild(errorEl);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatHistory.pop();
+  }
+}
+
+function appendUserMessage(instruction, selectedText) {
+  const messagesEl = $('chat-messages');
+  $('chat-empty')?.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg chat-msg-user';
+  let inner = '';
+  if (selectedText) {
+    const preview = selectedText.length > 60 ? selectedText.slice(0, 60) + '…' : selectedText;
+    inner += `<div class="chat-msg-ctx-pill">"${escHtml(preview)}"</div>`;
+  }
+  inner += `<div class="chat-bubble">${escHtml(instruction)}</div>`;
+  msg.innerHTML = inner;
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function appendAssistantMessage(explanation, improved, savedRange, savedText) {
+  const messagesEl = $('chat-messages');
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg chat-msg-ai';
+
+  let inner = '';
+  if (explanation) inner += `<div class="chat-bubble">${escHtml(explanation)}</div>`;
+
+  if (improved) {
+    const impId = 'imp-' + Date.now();
+    inner +=
+      `<div class="chat-improved" id="${impId}">` +
+        `<div class="chat-improved-label">Sugestão de melhoria</div>` +
+        `<div class="chat-improved-text">${escHtml(improved)}</div>` +
+        `<div class="chat-improved-actions">` +
+          `<button class="chat-btn-accept">Aplicar no documento</button>` +
+          `<button class="chat-btn-copy">Copiar</button>` +
+        `</div>` +
+      `</div>`;
+  }
+
+  msg.innerHTML = inner;
+
+  if (improved) {
+    msg.querySelector('.chat-btn-accept').addEventListener('click', function() {
+      applyImprovement(improved, savedText, savedRange, this);
+    });
+    msg.querySelector('.chat-btn-copy').addEventListener('click', async function() {
+      await navigator.clipboard.writeText(improved);
+      const prev = this.textContent;
+      this.textContent = 'Copiado!';
+      setTimeout(() => { this.textContent = prev; }, 2000);
+    });
+  }
+
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function applyImprovement(improved, originalText, range, acceptBtn) {
+  if (!range) {
+    if (acceptBtn) { acceptBtn.textContent = 'Sem selecção activa'; acceptBtn.disabled = true; }
+    return;
+  }
+  try {
+    range.deleteContents();
+    const node = document.createTextNode(improved);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+  } catch (e) {}
+
+  if (originalText && markdownContent.includes(originalText)) {
+    markdownContent = markdownContent.replace(originalText, improved);
+  }
+  if (acceptBtn) { acceptBtn.textContent = 'Aplicado ✓'; acceptBtn.disabled = true; }
 }

@@ -9,36 +9,235 @@ const screenshotEls = new Map();
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (async function init() {
-  const { pendingDocument, pendingSession } =
-    await chrome.storage.local.get(['pendingDocument', 'pendingSession']);
+  const stored = await chrome.storage.local.get([
+    'pendingStreamConfig', 'pendingDocument', 'pendingSession',
+  ]);
 
-  if (!pendingDocument || !pendingSession) {
+  if (stored.pendingStreamConfig && stored.pendingSession) {
+    // ── Streaming mode ────────────────────────────────────────────────────────
+    const streamConfig = stored.pendingStreamConfig;
+    sessionData = stored.pendingSession;
+
+    // Consume the config so re-opening the page falls back to saved document
+    await chrome.storage.local.remove('pendingStreamConfig');
+
+    document.title = `${sessionData.title} — DocFlow`;
+    document.getElementById('header-title').textContent = sessionData.title;
+
+    if (sessionData.refFiles?.length) setupRefBadge(sessionData.refFiles);
+
+    setupExports();
+    setupLightbox();
+    setupChat();
+    setupComplement();
+    setupValidation();
+
+    document.getElementById('loading').remove();
+    document.getElementById('app').classList.remove('hidden');
+
+    // Stream into document area; when done, render sidebar/screenshots/regen
+    await startStreaming(streamConfig);
+
+  } else if (stored.pendingDocument && stored.pendingSession) {
+    // ── Normal (pre-saved) mode ───────────────────────────────────────────────
+    markdownContent = stored.pendingDocument;
+    sessionData     = stored.pendingSession;
+
+    document.title = `${sessionData.title} — DocFlow`;
+    document.getElementById('header-title').textContent = sessionData.title;
+
+    if (sessionData.refFiles?.length) setupRefBadge(sessionData.refFiles);
+
+    const usedStepIds = renderDocument();
+    renderSidebar();
+    renderScreenshots(usedStepIds);
+    setupExports();
+    setupLightbox();
+    setupChat();
+    setupComplement();
+    setupValidation();
+    setupSectionRegen();
+
+    document.getElementById('loading').remove();
+    document.getElementById('app').classList.remove('hidden');
+
+  } else {
     document.getElementById('loading').remove();
     document.getElementById('no-doc').classList.remove('hidden');
+  }
+})();
+
+// ── Streaming generation ──────────────────────────────────────────────────────
+
+async function startStreaming(config) {
+  const contentEl = document.getElementById('document-content');
+  contentEl.innerHTML =
+    '<div class="stream-init"><div class="stream-cursor-block"></div>' +
+    '<span>A gerar documentação…</span></div>';
+
+  // Get API key directly from extension storage
+  let apiKey;
+  try {
+    const [sess, local] = await Promise.all([
+      chrome.storage.session.get(['unlockedKeys']).catch(() => ({})),
+      chrome.storage.local.get(['anthropicKey', 'openaiKey', 'apiKey']),
+    ]);
+    const uk = sess.unlockedKeys || {};
+    apiKey = config.provider === 'openai'
+      ? (uk.openaiKey  || local.openaiKey)
+      : (uk.anthropicKey || local.anthropicKey || local.apiKey);
+  } catch (err) {
+    contentEl.innerHTML = `<div class="stream-error">Erro ao obter chave de API: ${escHtml(err.message)}</div>`;
     return;
   }
 
-  markdownContent = pendingDocument;
-  sessionData     = pendingSession;
-
-  document.title = `${sessionData.title} — DocFlow`;
-  document.getElementById('header-title').textContent = sessionData.title;
-
-  if (sessionData.refFiles?.length) {
-    setupRefBadge(sessionData.refFiles);
+  if (!apiKey) {
+    contentEl.innerHTML =
+      '<div class="stream-error">Chave de API não configurada. ' +
+      'Abre o Dashboard → Configurações.</div>';
+    return;
   }
 
+  let accum = '';
+  let lastRender = 0;
+  const RENDER_MS = 120;
+
+  function onChunk(text) {
+    accum += text;
+    const now = Date.now();
+    if (now - lastRender > RENDER_MS) {
+      contentEl.innerHTML =
+        markdownToHtml(accum) +
+        '<span class="stream-cursor-inline" aria-hidden="true"></span>';
+      lastRender = now;
+    }
+  }
+
+  try {
+    if (config.provider === 'openai') {
+      await streamOpenAI(config, apiKey, onChunk);
+    } else {
+      await streamAnthropic(config, apiKey, onChunk);
+    }
+  } catch (err) {
+    if (!accum) {
+      contentEl.innerHTML =
+        `<div class="stream-error">${escHtml(err.message)}</div>`;
+      return;
+    }
+    // Partial result — still render what arrived
+  }
+
+  markdownContent = accum;
+
+  // Persist to history so refresh/revisit shows the document
+  chrome.runtime.sendMessage({
+    type: 'SAVE_GENERATED_DOC',
+    sessionIds: config.sessionIds,
+    title:      config.title,
+    markdown:   markdownContent,
+  }).catch(() => {});
+
+  // Full render now that markdown is complete
   const usedStepIds = renderDocument();
   renderSidebar();
   renderScreenshots(usedStepIds);
-  setupExports();
-  setupLightbox();
-  setupChat();
-  setupComplement();
+  setupSectionRegen();
+}
 
-  document.getElementById('loading').remove();
-  document.getElementById('app').classList.remove('hidden');
-})();
+async function streamAnthropic(config, apiKey, onChunk) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'prompt-caching-2024-07-31',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model:      config.model,
+      max_tokens: 8192,
+      stream:     true,
+      system:     [{ type: 'text', text: config.effectiveSystemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages:   [{ role: 'user', content: config.userMessage }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Erro Anthropic: ${response.status}`);
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let   buf     = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (raw === '[DONE]') return;
+      try {
+        const ev = JSON.parse(raw);
+        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+          onChunk(ev.delta.text);
+        }
+      } catch (_) {}
+    }
+  }
+}
+
+async function streamOpenAI(config, apiKey, onChunk) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model:      config.model,
+      max_tokens: 8192,
+      stream:     true,
+      messages:   [
+        { role: 'system', content: config.effectiveSystemPrompt },
+        { role: 'user',   content: config.userMessage },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Erro OpenAI: ${response.status}`);
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let   buf     = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (raw === '[DONE]') return;
+      try {
+        const ev      = JSON.parse(raw);
+        const content = ev.choices?.[0]?.delta?.content;
+        if (content) onChunk(content);
+      } catch (_) {}
+    }
+  }
+}
 
 // ── Document rendering with inline screenshots (US-10, US-11) ────────────────
 
@@ -69,13 +268,16 @@ function renderDocument() {
   const contentEl = document.getElementById('document-content');
   contentEl.innerHTML = html;
 
-  // Open lightbox when an inline screenshot is clicked
-  contentEl.addEventListener('click', e => {
-    const fig = e.target.closest('.inline-screenshot');
-    if (!fig) return;
-    const step = sessionData.steps.find(s => s.id === fig.dataset.stepId);
-    if (step) openLightbox(step);
-  });
+  // Attach click handler only once (event delegation — survives innerHTML replacements)
+  if (!contentEl.dataset.clickBound) {
+    contentEl.dataset.clickBound = '1';
+    contentEl.addEventListener('click', e => {
+      const fig = e.target.closest('.inline-screenshot');
+      if (!fig) return;
+      const step = sessionData.steps.find(s => s.id === fig.dataset.stepId);
+      if (step) openLightbox(step);
+    });
+  }
 
   return usedStepIds;
 }
@@ -137,7 +339,7 @@ function renderScreenshots(usedStepIds = new Set()) {
   );
 
   if (!stepsWithScreenshot.length) {
-    document.getElementById('screenshots-section').remove();
+    document.getElementById('screenshots-section')?.remove();
     return;
   }
 
@@ -248,6 +450,264 @@ function setupComplement() {
   });
 }
 
+// ── Validation ────────────────────────────────────────────────────────────────
+
+function setupValidation() {
+  const btn = document.getElementById('btn-validate');
+  if (!btn) return;
+  btn.addEventListener('click', runValidation);
+}
+
+async function runValidation() {
+  const btn   = document.getElementById('btn-validate');
+  const panel = document.getElementById('validation-panel');
+  if (!panel) return;
+
+  btn.disabled = true;
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML =
+    '<svg class="spin-icon" width="13" height="13" viewBox="0 0 20 20" fill="currentColor">' +
+    '<path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>' +
+    '</svg> A validar…';
+
+  panel.classList.remove('hidden');
+  panel.innerHTML = '<div class="validation-loading"><div class="spinner-sm"></div> A analisar o documento…</div>';
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type:     'VALIDATE_DOCUMENT',
+      markdown: markdownContent,
+      steps:    sessionData.steps,
+    });
+
+    btn.disabled  = false;
+    btn.innerHTML = originalHtml;
+
+    if (result?.error) {
+      panel.innerHTML = `<div class="validation-error">${escHtml(result.error)}</div>`;
+      return;
+    }
+    renderValidationResult(result.result);
+  } catch (err) {
+    btn.disabled  = false;
+    btn.innerHTML = originalHtml;
+    panel.innerHTML = `<div class="validation-error">${escHtml(err.message)}</div>`;
+  }
+}
+
+function renderValidationResult(data) {
+  const panel = document.getElementById('validation-panel');
+  const score = Math.round(data.score ?? 0);
+  const scoreColor = score >= 80 ? 'var(--green)' : score >= 55 ? '#f59e0b' : '#ef4444';
+
+  let html =
+    `<div class="validation-header">` +
+      `<div class="validation-score" style="color:${scoreColor}">${score}<span>%</span></div>` +
+      `<div class="validation-summary">${escHtml(data.summary || '')}</div>` +
+      `<button class="validation-close" id="validation-close" title="Fechar">✕</button>` +
+    `</div>`;
+
+  if (data.issues?.length) {
+    html += `<div class="validation-section"><div class="validation-section-title">Pontos a melhorar</div>`;
+    data.issues.forEach(issue => {
+      const icon = issue.type === 'missing' ? '⚠' : '⚡';
+      html +=
+        `<div class="validation-item validation-issue">` +
+        `<span class="vi-icon">${icon}</span>` +
+        `<span>${escHtml(issue.description)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  if (data.ok?.length) {
+    html += `<div class="validation-section"><div class="validation-section-title">Pontos positivos</div>`;
+    data.ok.forEach(item => {
+      html +=
+        `<div class="validation-item validation-ok">` +
+        `<span class="vi-icon">✓</span>` +
+        `<span>${escHtml(item)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  panel.innerHTML = html;
+  document.getElementById('validation-close').addEventListener('click', () => {
+    panel.classList.add('hidden');
+  });
+}
+
+// ── Section regeneration ──────────────────────────────────────────────────────
+
+let _regenPopover    = null;
+let _regenCloseClick = null;
+
+function setupSectionRegen() {
+  const contentEl = document.getElementById('document-content');
+  contentEl.querySelectorAll('h2, h3').forEach(h => {
+    // Avoid adding duplicate buttons if called multiple times
+    if (h.querySelector('.section-regen-btn')) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'section-regen-btn';
+    btn.title     = 'Regenerar esta secção com IA';
+    btn.innerHTML =
+      '<svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">' +
+      '<path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>' +
+      '</svg>';
+    h.appendChild(btn);
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openRegenPopover(h, btn);
+    });
+  });
+}
+
+function openRegenPopover(heading, triggerBtn) {
+  closeRegenPopover();
+
+  const popover = document.createElement('div');
+  popover.className = 'regen-popover';
+  popover.id        = 'regen-popover';
+
+  const headingText = heading.childNodes[0]?.textContent?.trim() || heading.textContent.trim();
+
+  popover.innerHTML =
+    `<div class="regen-popover-title">Regenerar secção</div>` +
+    `<div class="regen-popover-heading">${escHtml(headingText)}</div>` +
+    `<textarea class="regen-popover-input" rows="2" ` +
+      `placeholder="Instrução… ex: simplifica, adiciona mais detalhe, torna mais formal"></textarea>` +
+    `<div class="regen-popover-actions">` +
+      `<button class="regen-cancel">Cancelar</button>` +
+      `<button class="regen-submit">Regenerar</button>` +
+    `</div>` +
+    `<div class="regen-status hidden"></div>`;
+
+  document.body.appendChild(popover);
+  _regenPopover = popover;
+
+  // Position near the heading
+  const rect = triggerBtn.getBoundingClientRect();
+  const popW = 300;
+  popover.style.position = 'absolute';
+  popover.style.top      = `${rect.bottom + window.scrollY + 6}px`;
+  popover.style.left     = `${Math.max(8, Math.min(rect.left, window.innerWidth - popW - 8))}px`;
+  popover.style.width    = `${popW}px`;
+
+  popover.querySelector('.regen-popover-input').focus();
+
+  popover.querySelector('.regen-cancel').addEventListener('click', closeRegenPopover);
+
+  async function submit() {
+    const input       = popover.querySelector('.regen-popover-input');
+    const instruction = input.value.trim();
+    if (!instruction) return;
+    await doSectionRegen(heading, instruction, popover);
+  }
+
+  popover.querySelector('.regen-submit').addEventListener('click', submit);
+  popover.querySelector('.regen-popover-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+    if (e.key === 'Escape') closeRegenPopover();
+  });
+
+  _regenCloseClick = e => {
+    if (_regenPopover && !_regenPopover.contains(e.target)) closeRegenPopover();
+  };
+  setTimeout(() => document.addEventListener('mousedown', _regenCloseClick), 0);
+}
+
+function closeRegenPopover() {
+  if (_regenCloseClick) document.removeEventListener('mousedown', _regenCloseClick);
+  _regenCloseClick = null;
+  _regenPopover?.remove();
+  _regenPopover = null;
+}
+
+function extractSectionMarkdown(headingText, headingLevel) {
+  const lines  = markdownContent.split('\n');
+  const prefix = '#'.repeat(headingLevel) + ' ';
+
+  // Strip markdown inline formatting for comparison (** * `)
+  const stripMd = t => t.replace(/\*\*/g, '').replace(/\*/g, '').replace(/`/g, '').trim();
+
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(prefix)) continue;
+    const lineText = stripMd(lines[i].slice(prefix.length));
+    if (lineText === stripMd(headingText)) { start = i; break; }
+  }
+  if (start === -1) return null;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,6}) /);
+    if (m && m[1].length <= headingLevel) { end = i; break; }
+  }
+
+  return lines.slice(start, end).join('\n');
+}
+
+async function doSectionRegen(heading, instruction, popover) {
+  const submitBtn = popover.querySelector('.regen-submit');
+  const statusEl  = popover.querySelector('.regen-status');
+
+  submitBtn.disabled    = true;
+  submitBtn.textContent = 'A regenerar…';
+  statusEl.classList.remove('hidden');
+  statusEl.textContent  = 'A contactar a IA…';
+
+  const level       = parseInt(heading.tagName[1], 10);
+  const headingText = heading.childNodes[0]?.textContent?.trim() || heading.textContent.trim();
+  const sectionMd   = extractSectionMarkdown(headingText, level);
+
+  if (!sectionMd) {
+    statusEl.textContent  = 'Não foi possível localizar a secção no Markdown.';
+    submitBtn.disabled    = false;
+    submitBtn.textContent = 'Regenerar';
+    return;
+  }
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type:            'REGENERATE_SECTION',
+      sectionMarkdown: sectionMd,
+      instruction,
+    });
+
+    if (result?.error) {
+      statusEl.textContent  = `Erro: ${result.error}`;
+      submitBtn.disabled    = false;
+      submitBtn.textContent = 'Regenerar';
+      return;
+    }
+
+    // Update markdown and close popover before re-render
+    markdownContent = markdownContent.replace(sectionMd, result.markdown);
+    closeRegenPopover();
+
+    // Re-render document (screenshots section remains untouched)
+    renderDocument();
+    setupSectionRegen();
+
+    // Scroll to the regenerated heading
+    const allHeadings = document.getElementById('document-content').querySelectorAll('h2, h3');
+    for (const h of allHeadings) {
+      const ht = h.childNodes[0]?.textContent?.trim() || h.textContent.trim();
+      if (ht === headingText) {
+        h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        h.classList.add('regen-highlight');
+        setTimeout(() => h.classList.remove('regen-highlight'), 2000);
+        break;
+      }
+    }
+
+  } catch (err) {
+    statusEl.textContent  = `Erro: ${err.message}`;
+    submitBtn.disabled    = false;
+    submitBtn.textContent = 'Regenerar';
+  }
+}
+
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 
 function setupLightbox() {
@@ -281,6 +741,14 @@ function closeLightbox() {
 // ── Export (US-12) ────────────────────────────────────────────────────────────
 
 function setupExports() {
+  // Back to Dashboard — passes session ID so dashboard shows steps without auto-redirecting
+  document.getElementById('btn-back-dashboard').addEventListener('click', () => {
+    const sessionId = sessionData?.id || '';
+    window.location.href =
+      chrome.runtime.getURL('dashboard/dashboard.html') +
+      (sessionId ? `?manage=${encodeURIComponent(sessionId)}` : '');
+  });
+
   document.getElementById('btn-copy-md').addEventListener('click', copyMarkdown);
   document.getElementById('btn-download-html').addEventListener('click', downloadHtml);
   document.getElementById('btn-download-docx').addEventListener('click', () => {
@@ -393,7 +861,7 @@ function setupChat() {
     if (text.length < 10) { floatBtn.classList.add('hidden'); return; }
 
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    floatBtn.style.top  = `${rect.bottom + window.scrollY + 8}px`;
+    floatBtn.style.top  = `${rect.bottom + 8}px`;
     floatBtn.style.left = `${Math.max(0, Math.min(rect.left, window.innerWidth - 160))}px`;
     floatBtn.classList.remove('hidden');
   });
