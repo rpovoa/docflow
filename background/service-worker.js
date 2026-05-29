@@ -287,16 +287,17 @@ async function addStep(stepData, tabId) {
   const screenshot = shouldCapture ? await captureScreenshot(tabId) : null;
 
   const step = {
-    id:         generateId('step'),
-    index:      currentSession.steps.length + 1,
-    timestamp:  new Date().toISOString(),
-    type:       stepData.type,
-    element:    stepData.element    || null,
-    value:      stepData.value      ?? null,
-    url:        stepData.url        || '',
-    pageTitle:  stepData.pageTitle  || '',
-    note:       stepData.note       || '',
-    annotation: stepData.annotation || null,
+    id:          generateId('step'),
+    index:       currentSession.steps.length + 1,
+    timestamp:   new Date().toISOString(),
+    type:        stepData.type,
+    element:     stepData.element    || null,
+    value:       stepData.value      ?? null,
+    url:         stepData.url        || '',
+    pageTitle:   stepData.pageTitle  || '',
+    note:        stepData.note       || '',
+    annotation:  stepData.annotation || null,
+    domSnapshot: stepData.domSnapshot || null,
     screenshot,
   };
 
@@ -360,6 +361,12 @@ NARRAÇÃO DE VOZ:
 - Passos marcados com [Narração] são comentários de contexto gravados pelo utilizador
 - Integra o conteúdo narrado na descrição da área/ecrã correspondente para enriquecer a explicação funcional
 - Nunca cries uma secção separada para narrações
+
+COMPONENTES DO ECRÃ (DOM):
+- Blocos marcados com [Componentes detectados no ecrã:] listam TODOS os campos, botões e títulos presentes no ecrã no momento da navegação — incluindo os que o utilizador não interagiu
+- Usa estes dados para documentar campos que existem mas não foram preenchidos, botões disponíveis e a estrutura da página
+- Prioriza sempre as ações reais do utilizador para inferir obrigatoriedade e contexto; o DOM completa o que falta
+- Se um campo aparece no DOM mas não foi interagido, documenta-o na tabela de campos com a descrição funcional inferida pelo nome/tipo
 
 DUPLICADOS E RUÍDO:
 - Ignora cliques de foco em campos (o clique para ativar antes de escrever é implícito)
@@ -464,7 +471,11 @@ function buildSessionText(session) {
   const stepsText = screenGroups.map(group => {
     const label  = group.label || '—';
     const header = label !== '—' ? `--- Ecrã: ${label} ---` : '--- (ecrã desconhecido) ---';
-    return header + '\n' + group.steps.map(formatStep).join('\n');
+    const navStep = group.steps.find(s => s.type === 'navigation' && s.domSnapshot);
+    const domCtx  = navStep
+      ? `[Componentes detectados no ecrã:\n${navStep.domSnapshot}]\n`
+      : '';
+    return header + '\n' + domCtx + group.steps.map(formatStep).join('\n');
   }).join('\n\n');
 
   const narrationNote = narrationCount > 0
@@ -801,7 +812,8 @@ function filterDocumentByKeywords(text, keywords, maxChars) {
 // Template files (.md, .txt) are always included completely — they define writing style
 // and document structure that applies to every generation.
 // Domain files (.xlsx, .docx) are keyword-filtered for relevance and capped at 2 MB.
-// Returns { text, fileNames } or null if no files found.
+// Returns { text, fileNames, fileExcerpts } or null if no files found.
+// fileExcerpts maps fileName → first ~500 chars of extracted text (for UI proof-of-use display).
 async function loadReferenceKnowledge(keywords = []) {
   try {
     const war = chrome.runtime.getManifest().web_accessible_resources || [];
@@ -818,11 +830,13 @@ async function loadReferenceKnowledge(keywords = []) {
     const isTemplate   = p => /\.(md|txt)$/i.test(p);
     const MAX_FILE_MB  = 2_000_000; // skip binary files > 2 MB (e.g. large DOCX)
     const MAX_TMPL     = 42_000;    // chars budget for template files (always-on)
-    const MAX_DOMAIN   = 40_000;    // chars budget for domain files (keyword-filtered)
-    const MAX_PER_FILE = 20_000;    // per-file cap inside domain budget
+    const MAX_DOMAIN   = 80_000;    // chars budget for all domain files combined
+    const MAX_PER_FILE = 30_000;    // per-file cap inside domain budget
+    const EXCERPT_LEN  = 600;       // chars stored per file as proof-of-use excerpt
 
-    const parts     = [];
-    const fileNames = [];
+    const parts        = [];
+    const fileNames    = [];
+    const fileExcerpts = {};
     let   tmplTotal = 0;
     let   domTotal  = 0;
 
@@ -841,12 +855,13 @@ async function loadReferenceKnowledge(keywords = []) {
         parts.push(chunk.length > avail ? chunk.slice(0, avail) + '…' : chunk);
         tmplTotal += Math.min(chunk.length, avail);
         fileNames.push(name);
+        fileExcerpts[name] = text.slice(0, EXCERPT_LEN).trim();
       } catch (e) {
         console.warn(`[DocFlow] Erro ao carregar template "${path}":`, e.message);
       }
     }
 
-    // ── Domain files: keyword-filtered, large files skipped ───────────────────
+    // ── Domain files: always included up to per-file cap, large files skipped ───
     for (const path of refPaths.filter(p => !isTemplate(p))) {
       if (domTotal >= MAX_DOMAIN) break;
       try {
@@ -863,18 +878,22 @@ async function loadReferenceKnowledge(keywords = []) {
         else if (ext === 'xlsx')  text = await extractXlsxText(buf);
         if (!text?.trim()) continue;
 
-        const filtered  = filterDocumentByKeywords(text.trim(), keywords, MAX_PER_FILE);
-        const chunk     = `### ${name}\n${filtered}`;
+        // Include full content up to per-file cap — no keyword filtering.
+        // The AI model determines relevance; filtering here caused too many misses.
+        const trimmed   = text.trim();
+        const content   = trimmed.length > MAX_PER_FILE ? trimmed.slice(0, MAX_PER_FILE) + '…' : trimmed;
+        const chunk     = `### ${name}\n${content}`;
         const remaining = MAX_DOMAIN - domTotal;
         parts.push(chunk.length > remaining ? chunk.slice(0, remaining) + '…' : chunk);
         domTotal += Math.min(chunk.length, remaining);
         fileNames.push(name);
+        fileExcerpts[name] = content.slice(0, EXCERPT_LEN).trim();
       } catch (e) {
         console.warn(`[DocFlow] Erro ao carregar referência "${path}":`, e.message);
       }
     }
 
-    return parts.length ? { text: parts.join('\n\n'), fileNames } : null;
+    return parts.length ? { text: parts.join('\n\n'), fileNames, fileExcerpts } : null;
   } catch (_) { return null; }
 }
 
@@ -907,7 +926,11 @@ function buildMultiSessionText(sessions) {
     const stepsText = screenGroups.map(group => {
       const label  = group.label || '—';
       const header = label !== '—' ? `--- Ecrã: ${label} ---` : '--- (ecrã desconhecido) ---';
-      return header + '\n' + group.steps.map(formatStep).join('\n');
+      const navStep = group.steps.find(s => s.type === 'navigation' && s.domSnapshot);
+      const domCtx  = navStep
+        ? `[Componentes detectados no ecrã:\n${navStep.domSnapshot}]\n`
+        : '';
+      return header + '\n' + domCtx + group.steps.map(formatStep).join('\n');
     }).join('\n\n');
 
     return `PROCESSO ${sIdx + 1}: "${session.title}" (${date})\n${stepsText}`;
@@ -1040,7 +1063,7 @@ async function generateDocument(sessionIds) {
       '• Os ficheiros de domínio contêm terminologia, campos, fluxos e regras de negócio do sistema — usa-os para enriquecer o documento com detalhes precisos e linguagem específica da organização.\n' +
       '---\n' + refResult.text + '\n---\n\n' +
       userMessage;
-    pendingSession = { ...pendingSession, refFiles: refResult.fileNames };
+    pendingSession = { ...pendingSession, refFiles: refResult.fileNames, refExcerpts: refResult.fileExcerpts };
   }
 
   // Build effective system prompt — append active skills
@@ -1073,15 +1096,17 @@ async function generateDocument(sessionIds) {
       userMessage,
       effectiveSystemPrompt,
       sessionIds: sessions.map(s => s.id),
-      title: pendingSession.title,
+      title:       pendingSession.title,
+      refFiles:    refResult?.fileNames    || [],
+      refExcerpts: refResult?.fileExcerpts || {},
     },
     pendingSession,
   });
   return { streaming: true };
 }
 
-async function saveGeneratedDoc(sessionIds, title, markdown) {
-  await saveDocumentToHistory(sessionIds, title, markdown);
+async function saveGeneratedDoc(sessionIds, title, markdown, refFiles, refExcerpts) {
+  await saveDocumentToHistory(sessionIds, title, markdown, refFiles, refExcerpts);
   await chrome.storage.local.set({ pendingDocument: markdown });
   return { ok: true };
 }
@@ -1167,7 +1192,7 @@ async function regenerateSection(sectionMarkdown, instruction) {
   }
 }
 
-async function saveDocumentToHistory(sessionIds, title, markdown) {
+async function saveDocumentToHistory(sessionIds, title, markdown, refFiles, refExcerpts) {
   const data = await chrome.storage.local.get(['documentHistory']);
   const history = Array.isArray(data.documentHistory) ? data.documentHistory : [];
   const doc = {
@@ -1176,6 +1201,8 @@ async function saveDocumentToHistory(sessionIds, title, markdown) {
     title,
     markdown,
     generatedAt: new Date().toISOString(),
+    refFiles:    refFiles    || [],
+    refExcerpts: refExcerpts || {},
   };
   // Replace any existing doc for the exact same session set
   const key      = sessionIds.slice().sort().join(',');
@@ -1527,7 +1554,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case MSG.SAVE_GENERATED_DOC:
-      saveGeneratedDoc(message.sessionIds, message.title, message.markdown)
+      saveGeneratedDoc(message.sessionIds, message.title, message.markdown, message.refFiles, message.refExcerpts)
         .then(result => sendResponse(result))
         .catch(err   => sendResponse({ error: err.message }));
       return true;

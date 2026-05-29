@@ -80,6 +80,82 @@
     });
   }
 
+  // ── Semantic DOM extraction ───────────────────────────────────────────────
+
+  function extractSemanticDOM() {
+    const MAX_CHARS = 3000;
+    const sidebarEl = document.getElementById('docflow-sidebar-host');
+
+    function isVisible(el) {
+      try {
+        if (sidebarEl && sidebarEl.contains(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0;
+      } catch (_) { return false; }
+    }
+
+    function fieldLabel(el) {
+      const aria = el.getAttribute('aria-label');
+      if (aria) return aria.trim().slice(0, 60);
+      const lbId = el.getAttribute('aria-labelledby');
+      if (lbId) {
+        const lbEl = document.getElementById(lbId);
+        if (lbEl) return (lbEl.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      }
+      if (el.id) {
+        const lbEl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (lbEl) return (lbEl.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      }
+      const closest = el.closest('label');
+      if (closest) return (closest.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      if (el.placeholder) return el.placeholder.trim().slice(0, 60);
+      if (el.name) return el.name.slice(0, 60);
+      return null;
+    }
+
+    const parts = [];
+
+    // Headings
+    const heads = [...document.querySelectorAll('h1,h2,h3,h4')]
+      .filter(isVisible)
+      .map(h => (h.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80))
+      .filter(Boolean);
+    if (heads.length) parts.push('Títulos: ' + heads.join(' › '));
+
+    // Form fields
+    const fieldEls = [...document.querySelectorAll(
+      'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]),' +
+      'select,textarea'
+    )].filter(isVisible);
+
+    const fieldLines = fieldEls.map(el => {
+      const lbl  = fieldLabel(el) || '—';
+      const type = el.tagName === 'SELECT' ? 'select' : (el.getAttribute('type') || 'text');
+      if (el.tagName === 'SELECT') {
+        const opts = [...el.options].slice(0, 6).map(o => o.text.trim()).filter(Boolean);
+        return `${lbl} [select${opts.length ? ': ' + opts.join(', ') : ''}]`;
+      }
+      return `${lbl} [${type}]`;
+    });
+    if (fieldLines.length) parts.push('Campos:\n' + fieldLines.map(l => '  • ' + l).join('\n'));
+
+    // Buttons
+    const btnEls = [...document.querySelectorAll('button,input[type=submit],input[type=button],[role=button]')]
+      .filter(el => isVisible(el) && !(sidebarEl && sidebarEl.contains(el)));
+    const btnTexts = [...new Set(
+      btnEls
+        .map(el => (el.textContent || el.value || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 50))
+        .filter(Boolean)
+    )].slice(0, 15);
+    if (btnTexts.length) parts.push('Botões: ' + btnTexts.join(' | '));
+
+    if (!parts.length) return null;
+    const result = parts.join('\n');
+    return result.length > MAX_CHARS ? result.slice(0, MAX_CHARS) + '…' : result;
+  }
+
   // ── Visual feedback ───────────────────────────────────────────────────────
 
   function flashElement(el) {
@@ -145,12 +221,23 @@
 
   // ── SPA navigation ────────────────────────────────────────────────────────
 
-  let lastUrl = location.href;
+  let lastUrl    = location.href;
+  let _navTimer  = null;
 
   function checkNavigation() {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
-      if (isRecording && !isPaused) trackEvent({ type: 'navigation' });
+      if (isRecording && !isPaused) {
+        // Debounce: SPAs sometimes fire multiple URL changes in quick succession.
+        // Wait 600ms for the new view to render before capturing DOM + sending step.
+        clearTimeout(_navTimer);
+        const capturedUrl = location.href;
+        _navTimer = setTimeout(() => {
+          if (!isRecording || isPaused) return;
+          const domSnapshot = extractSemanticDOM();
+          trackEvent({ type: 'navigation', domSnapshot: domSnapshot || undefined });
+        }, 600);
+      }
     }
   }
 

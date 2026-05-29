@@ -1,5 +1,4 @@
-/* Blue outline flash on clicked elements */
+/* Subtle ring on clicked elements */
 .docflow-flash {
-  outline: 2px solid #3b82f6 !important;
-  outline-offset: 2px !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4) !important;
 }

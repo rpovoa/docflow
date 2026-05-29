@@ -625,7 +625,7 @@ function renderDocumentView() {
   markdownContent = activeDoc.markdown;
   const usedStepIds = renderDocumentContent();
   renderScreenshots(usedStepIds);
-  setupRefBadge(activeSession?.refFiles);
+  setupRefBadge(activeDoc?.refFiles || activeSession?.refFiles, activeDoc?.refExcerpts || activeSession?.refExcerpts);
   setupSectionRegen();
   setupLightboxOnDocument();
   setupDocFeaturesOnce();
@@ -875,7 +875,6 @@ function renderDocumentDetail() {
   $('recording-banner').classList.add('hidden');
   $('resume-toast').classList.add('hidden');
   $('detail-tabs').classList.add('hidden');
-  $('ref-badge').classList.add('hidden');
 
   // Buttons available in document-only view
   $('btn-chat').classList.remove('hidden');
@@ -1879,9 +1878,23 @@ function sanitizeFilename(name) {
 
 async function startStreaming(config) {
   const contentEl = $('document-content');
+
+  // Show which reference files were loaded before the API call begins
+  const refFiles = config.refFiles || [];
+  const refsHtml = refFiles.length
+    ? `<div class="stream-refs">` +
+      `<svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0;opacity:.6">` +
+      `<path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.396 0 2.7.35 3.834.992A7.967 7.967 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z"/>` +
+      `</svg>` +
+      `<span><strong>${refFiles.length} ficheiro${refFiles.length > 1 ? 's' : ''} de referência lido${refFiles.length > 1 ? 's' : ''}:</strong> ` +
+      refFiles.map(f => `<span class="stream-refs-file">${escHtml(f)}</span>`).join('') +
+      `</span></div>`
+    : '';
+
   contentEl.innerHTML =
     '<div class="stream-init"><div class="stream-cursor-block"></div>' +
-    '<span>A gerar documentação…</span></div>';
+    '<span>A gerar documentação…</span></div>' +
+    refsHtml;
 
   let apiKey;
   try {
@@ -1936,10 +1949,12 @@ async function startStreaming(config) {
   markdownContent = accum;
 
   await chrome.runtime.sendMessage({
-    type: 'SAVE_GENERATED_DOC',
-    sessionIds: config.sessionIds,
-    title:      config.title,
-    markdown:   markdownContent,
+    type:        'SAVE_GENERATED_DOC',
+    sessionIds:  config.sessionIds,
+    title:       config.title,
+    markdown:    markdownContent,
+    refFiles:    config.refFiles    || [],
+    refExcerpts: config.refExcerpts || {},
   }).catch(() => {});
 
   // Refresh local documents
@@ -1966,7 +1981,7 @@ async function startStreaming(config) {
 
   const usedStepIds = renderDocumentContent();
   renderScreenshots(usedStepIds);
-  if (!isCombined) setupRefBadge(activeSession?.refFiles);
+  setupRefBadge(activeDoc?.refFiles || activeSession?.refFiles, activeDoc?.refExcerpts || config.refExcerpts);
   setupSectionRegen();
   setupLightboxOnDocument();
   setupDocFeaturesOnce();
@@ -2075,7 +2090,7 @@ async function streamOpenAI(config, apiKey, onChunk) {
 
 // ── Reference badge ───────────────────────────────────────────────────────────
 
-function setupRefBadge(refFiles) {
+function setupRefBadge(refFiles, refExcerpts) {
   const badge   = $('ref-badge');
   const popover = $('ref-popover');
   const list    = $('ref-popover-list');
@@ -2086,16 +2101,42 @@ function setupRefBadge(refFiles) {
     return;
   }
 
+  const excerpts = refExcerpts || {};
   const n = refFiles.length;
   badge.textContent = `📚 ${n} referência${n > 1 ? 's' : ''}`;
   badge.classList.remove('hidden');
 
-  list.innerHTML = refFiles.map(f =>
-    `<li class="ref-popover-item">` +
-    `<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" class="ref-file-icon">` +
-    `<path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>` +
-    `</svg><span>${escHtml(f)}</span></li>`
-  ).join('');
+  list.innerHTML = refFiles.map(f => {
+    const excerpt = excerpts[f];
+    const hasExcerpt = excerpt && excerpt.trim().length > 0;
+    return (
+      `<li class="ref-popover-item" data-file="${escAttr(f)}">` +
+      `<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" class="ref-file-icon">` +
+      `<path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>` +
+      `</svg>` +
+      `<span class="ref-item-name">${escHtml(f)}</span>` +
+      (hasExcerpt
+        ? `<button class="ref-excerpt-toggle" data-file="${escAttr(f)}" title="Ver conteúdo extraído">Ver conteúdo</button>`
+        : '') +
+      `</li>` +
+      (hasExcerpt
+        ? `<li class="ref-excerpt-body hidden" data-excerpt-for="${escAttr(f)}"><pre>${escHtml(excerpt)}${excerpt.length >= 600 ? '\n…' : ''}</pre></li>`
+        : '')
+    );
+  }).join('');
+
+  // Excerpt toggle clicks
+  list.querySelectorAll('.ref-excerpt-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const file    = btn.dataset.file;
+      const body    = list.querySelector(`[data-excerpt-for="${CSS.escape(file)}"]`);
+      if (!body) return;
+      const open = !body.classList.contains('hidden');
+      body.classList.toggle('hidden', open);
+      btn.textContent = open ? 'Ver conteúdo' : 'Ocultar';
+    });
+  });
 
   if (badge.dataset.popoverBound) return;
   badge.dataset.popoverBound = '1';
